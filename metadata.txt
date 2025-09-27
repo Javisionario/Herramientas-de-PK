@@ -1,0 +1,15 @@
+[general]
+name=PK Tools
+qgisMinimumVersion=3.22
+description=Herramientas para identificar, localizar y medir distancias entre PKs en capas lineales con geometría M.
+version=1.0
+author=Javi H Piris
+email=pirishj@gmail.com
+about=PK Tools unifica tres utilidades en un único complemento:
+  • Identificar PK: Clic en el mapa para obtener la vía y su el PK, con enlace a Street View y opciones de exportar los puntos identificados a una capa de puntos mediante click derecho.
+  • Localizar PK: Introduce carretera y PK para ubicar el punto exacto en el mapa, con posibilidad de recuperar el historial y exportar los puntos a una capa temporal y menú desplegable.
+  • Distancia PK: mide la distancia entre dos PKs sobre la misma vía, mostrando tanto la distancia por PK como la distancia lineal (en ocasiones la calibración de la capa no coincide con la diferencia entre PKs.
+  
+  Ideal para proyectos de carreteras o análisis de movilidad.
+category=Analysis
+icon=icons/identificar.png

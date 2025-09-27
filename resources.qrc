@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="/plugins/pk_tools">
+    <file>icons/identificar.png</file>
+    <file>icons/localizar.png</file>
+    <file>icons/distancia.png</file>
+  </qresource>
+</RCC>
