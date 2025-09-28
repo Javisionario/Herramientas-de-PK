@@ -4,21 +4,21 @@
 
 ![](PICTURES/ICONS.png)
 
-## 🔎 Identificar PK
+##  Identificar PK
 Permite identificar la vía y el punto kilométrico haciendo clic sobre una capa de carreteras (líneas calibradas con valores M).  
 Muestra el nombre de la vía, el PK interpolado, un enlace a Street View y botones para copiar información al portapapeles.  
 Además, permite exportar los PKs identificados a una capa temporal de puntos mediante clic derecho en el mapa.  
 El punto identificado queda marcado hasta que se seleccione otro o se apague el botón de la herramienta.
 ![](PICTURES/Identificar.png)
 
-## 📍 Localizar PK
+##  Localizar PK
 Abre una ventana donde el usuario puede introducir la carretera y el PK para ubicar el punto exacto en el mapa.  
 El complemento muestra un marcador, un enlace a Street View y un botón para centrar el mapa en el punto seleccionado.  
 Dispone de un historial accesible desde el menú desplegable del botón y permite exportar los puntos seleccionados a una capa temporal.  
 El marcador permanece hasta que se localice otro punto o se borre manualmente desde el menú.
 ![](PICTURES/Localizar.png)
 
-## 📏 Distancia PK
+##  Distancia PK
 Permite medir la distancia entre dos PKs sobre la misma vía, mostrando tanto la diferencia en PKs (basada en la calibración M) como la distancia lineal real calculada sobre la geometría.  
 Esto resulta muy útil porque pueden darse discrepancias entre la calibración y la geometría real.  
 Los puntos medidos quedan señalados con marcadores hasta que se realiza una nueva medición o se apaga la herramienta.
