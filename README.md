@@ -1,6 +1,7 @@
 # PK Tools
 
 **PK Tools** unifica tres herramientas en un único complemento de QGIS:
+![](PICTURES/ICONS.png)
 
 ## 🔎 Identificar PK
 Permite identificar la vía y el punto kilométrico haciendo clic sobre una capa de carreteras (líneas calibradas con valores M).  
