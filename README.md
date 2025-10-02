@@ -32,13 +32,20 @@ Estas herramientas son ideales para proyectos de carreteras o análisis de movil
 
 ## 📥 Instalación
 
-1. Descarga el repositorio de GitHub.  
-2. Copia la carpeta `pk_tools` en la carpeta de complementos de tu perfil de QGIS. Por ejemplo:  
+1. Descarga el repositorio de GitHub: `code → Download ZIP`
+2. Abre QGIS. En el panel superior ve a `Complementos → Administrar e instalar complementos →  Instalar desde ZIP`
+3. Busca la ruta de la carpeta descargada y haz click en instalar.
+
+Opcionalmente, también se puede instalar mediante el siguiente método
+1. Descomprime y copia la carpeta `pk_tools` en la carpeta de complementos de tu perfil de QGIS. Por ejemplo:  
    - **Windows**: `C:\Users\USUARIO\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\pk_tools`  
    - **Linux/Mac**: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/`  
-3. Reinicia QGIS.  
-4. Revisa los requisitos y, si no se cumplen, revisa la sección ⚙️ Configuración.  
-5. Activa el complemento desde el menú **Complementos → Administrar e instalar complementos**.
+2. Reinicia QGIS.
+3. El plugin debería estar instlado y debería aparecer en el la interfaz de usuario. De no aparecer actívalo en `Complementos → Administrar e instalar complementos →  Instalados`. Si `PK_tools` no está marcado, activalo y si es necesario, dale a `Instalar Plugin`.
+
+Finalmente, 
+
+7. Revisa los requisitos y, si no se cumplen, revisa la sección ⚙️ Configuración.
 
 ---
 
