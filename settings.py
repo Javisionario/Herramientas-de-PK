@@ -20,10 +20,9 @@ from qgis.core import (
     QgsSettings
 )
 from .utils import (
-    format_output_value,
+    format_value_for_mode,
     format_raw_m,
     normalize_output_mode,
-    raw_m_to_pk_km,
 )
 
 
@@ -192,7 +191,7 @@ class PKToolsSettingsDialog(QDialog):
         row_output.addWidget(self.cbo_output)
         layout.addLayout(row_output)
 
-        # Tolerancia visual para avisar si el segundo clic cae lejos de la geometria
+        # Tolerancia visual para avisar si el segundo clic cae lejos de la geometria.
         row_tolerance = QHBoxLayout()
         row_tolerance.addWidget(QLabel("Tolerancia clic-vía:"))
         self.spin_click_tolerance = QSpinBox()
@@ -322,7 +321,7 @@ class PKToolsSettingsDialog(QDialog):
 
     def _update_preview(self, layer: QgsVectorLayer, max_features: int = 5):
         """
-        Muestra valores M originales y su salida PK con la configuración actual.
+        Muestra valores M originales y la salida visible con la configuracion actual.
         """
         lines = []
         count = 0
@@ -339,21 +338,16 @@ class PKToolsSettingsDialog(QDialog):
             for pt in geom.vertices():
                 m = pt.m()
                 if m is not None:
-                    pk_km = raw_m_to_pk_km(m, units)
-                    output = format_output_value(
-                        raw_m=m,
-                        pk_km=pk_km,
-                        m_units=units,
-                        output_mode=output_mode,
-                    )
-                    samples.append(f"M {format_raw_m(m, units)} -> {output}")
+                    original = format_raw_m(m, units)
+                    output = format_value_for_mode(m, units, output_mode)
+                    samples.append(f"M original: {original} -> salida: {output}")
                 if len(samples) >= 3:  # unos pocos valores por feature
                     break
             if samples:
                 if id_field_index >= 0:
-                    label = f"Feature {feat.id()} ({id_field}={feat[id_field]})"
+                    label = f"Entidad {feat.id()} ({id_field}={feat[id_field]})"
                 else:
-                    label = f"Feature {feat.id()}"
+                    label = f"Entidad {feat.id()}"
                 lines.append(f"{label}: " + " | ".join(samples))
                 count += 1
             if count >= max_features:

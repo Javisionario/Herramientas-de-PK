@@ -61,8 +61,8 @@ class IdentificarPK:
         import os
         icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
         icon = QIcon(icon_path)
-        self.action = QAction(icon, "Identificar PK", self.iface.mainWindow())
-        self.action.setToolTip("Identificar PK en línea calibrada")
+        self.action = QAction(icon, "Identificar", self.iface.mainWindow())
+        self.action.setToolTip("Identificar una medida en la capa configurada")
         self.action.setCheckable(True)
         self.action.toggled.connect(self.toggle_tool)
         self.iface.addToolBarIcon(self.action)
@@ -148,7 +148,7 @@ class IdentificarPK:
 
     def show_pk_message(self, nombre_via, pk_value, url_sv, lat=None, lon=None,
                         raw_m=None, m_units="m", output_mode="pk"):
-        """Muestra en la barra el PK identificado, con enlace y botones de copia."""
+        """Muestra en la barra el valor identificado, con enlace y botones de copia."""
         if raw_m is None:
             raw_m = pk_km_to_raw_m(pk_value, m_units)
         value_text = format_value_for_mode(raw_m, m_units, output_mode)
@@ -457,14 +457,16 @@ class IdentificarPKTool(QgsMapTool):
             )
 
             field = self.id_field
+            terms = output_terms(self.output_mode)
+            unknown_label = f"{terms['identifier']} desconocido"
             try:
                 nombre_via = (
                     closest_feat[field]
                     if field and closest_feat[field] not in (None, "")
-                    else "Vía desconocida"
+                    else unknown_label
                 )
             except Exception:
-                nombre_via = "Vía desconocida"
+                nombre_via = unknown_label
 
             # Guardar en historial y mostrar mensaje
             self._push_history(nombre_via, pk_final, proj_pt_map, m_raw)
@@ -488,9 +490,10 @@ class IdentificarPKTool(QgsMapTool):
 
     def _export_points_dialog(self):
         """Muestra el diálogo de exportación y guarda los puntos en una capa temporal."""
+        tool_title = "Identificar medida" if self.output_mode == "raw_m" else "Identificar PK"
         if not self.history:
             self.iface.messageBar().pushMessage(
-                "Identificar PK", "No hay puntos recientes para exportar.",
+                tool_title, "No hay puntos recientes para exportar.",
                 level=Qgis.Info
             )
             return
@@ -514,7 +517,7 @@ class IdentificarPKTool(QgsMapTool):
             idxs = dlg.selected_indices()
             if not idxs:
                 self.iface.messageBar().pushMessage(
-                    "Identificar PK", "No se seleccionaron puntos.",
+                    tool_title, "No se seleccionaron puntos.",
                     level=Qgis.Info
                 )
                 return
@@ -522,12 +525,14 @@ class IdentificarPKTool(QgsMapTool):
             lyr = self._ensure_output_layer()
             if not lyr:
                 self.iface.messageBar().pushMessage(
-                    "Identificar PK", "No se pudo crear la capa de salida.",
+                    tool_title, "No se pudo crear la capa de salida.",
                     level=Qgis.Warning
                 )
                 return
 
-            # Crear features y añadirlos
+            # Exportacion conservadora:
+            # - modo PK: PK sin prefijo y PK_NUM numerico
+            # - modo M bruto: solo M_RAW numerico
             prov = lyr.dataProvider()
             feats = []
             for it in sel_items:

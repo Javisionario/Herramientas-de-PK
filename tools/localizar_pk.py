@@ -53,7 +53,7 @@ class LocalizarPK:
         self.canvas = iface.mapCanvas()
         self.action = None
         self.history_menu = None
-        self.history = []   # [(via, pk_km, map_pt)]
+        self.history = []   # [(identificador, pk_km, raw_m, map_pt)]
         self.markers = []   # [QgsVertexMarker, QgsVertexMarker]
         self.layer = None
         self.id_field = EXPECTED_FIELD
@@ -64,8 +64,8 @@ class LocalizarPK:
 
     def create_action(self):
         icon = QIcon(":/plugins/pk_tools/icons/localizar.png")
-        self.action = QAction(icon, "Localizar PK", self.iface.mainWindow())
-        self.action.setToolTip("Localizar punto según PK en vía calibrada")
+        self.action = QAction(icon, "Localizar", self.iface.mainWindow())
+        self.action.setToolTip("Localizar una medida en la capa configurada")
         self.history_menu = QMenu(self.iface.mainWindow())
         self.history_menu.setTitle("Historial")
         self.action.setMenu(self.history_menu)
@@ -77,8 +77,8 @@ class LocalizarPK:
         # Solo se usaría si esta clase gestionara su propio botón,
         # pero pk_tools.py ya crea la acción con create_action().
         icon = QIcon(":/plugins/pk_tools/icons/localizar.png")
-        self.action = QAction(icon, "Localizar PK", self.iface.mainWindow())
-        self.action.setToolTip("Localizar punto según PK en vía calibrada")
+        self.action = QAction(icon, "Localizar", self.iface.mainWindow())
+        self.action.setToolTip("Localizar una medida en la capa configurada")
         self.history_menu = QMenu(self.iface.mainWindow())
         self.history_menu.setTitle("Historial")
         self.action.setMenu(self.history_menu)
@@ -167,7 +167,7 @@ class LocalizarPK:
         h2 = QHBoxLayout()
         h2.addWidget(QLabel(f"{terms['measure']}:"))
         self.le_pk = QLineEdit()
-        placeholder = "Ej.: 150 | 150.500 | 150+500" if self.output_mode == "pk" else "Ej.: 150500"
+        placeholder = "15+000 | 15.500 | 15" if self.output_mode == "pk" else "Ej.: 15500"
         self.le_pk.setPlaceholderText(placeholder)
         self.le_pk.returnPressed.connect(dlg.accept)
         h2.addWidget(self.le_pk)
@@ -190,7 +190,7 @@ class LocalizarPK:
 
         via_text = self.le_road.text().strip()
         if not via_text:
-            self.iface.messageBar().pushWarning(terms["tool_locate"], f"Introduce un {terms['identifier_lower']}.")
+            self.iface.messageBar().pushWarning(terms["tool_locate"], f"Introduce {terms['identifier_prompt']}.")
             return
         via = self._resolve_road_name(via_text, road_names)
         if via is None:
@@ -212,9 +212,6 @@ class LocalizarPK:
             return
 
         self.locate(via, pk_total_km, via_value)
-
-    def _field_value_text(self, value):
-        return "" if value in (None, "") else str(value).strip()
 
     def _resolve_road_name(self, text, road_names):
         """Respeta el valor real y solo corrige mayúsculas si no hay ambigüedad."""
@@ -309,7 +306,7 @@ class LocalizarPK:
         target_m = pk_km_to_raw_m(pk_km, self.m_units)
         EPS = 1e-6
 
-        # 1) Reunir TODAS las features de la vía
+        # Reunir features del identificador con filtro de proveedor y fallback seguro.
         if not self.layer:
             self.iface.messageBar().pushWarning(output_terms(self.output_mode)["tool_locate"], "No hay capa seleccionada.")
             return
@@ -320,11 +317,11 @@ class LocalizarPK:
             terms = output_terms(self.output_mode)
             self.iface.messageBar().pushInfo(
                 terms["tool_locate"],
-                f"No se encontró {terms['identifier_lower']} '{via}'."
+                f"No se encontró {terms['identifier_with_article']} '{via}'."
             )
             return
 
-        # 2) Buscar todos los segmentos reales que contienen el target.
+        # Buscar segmentos reales que contienen la medida, sin unir partes multipart.
         coverage_intervals = []
         candidates = []
 
@@ -375,7 +372,7 @@ class LocalizarPK:
                 terms = output_terms(self.output_mode)
                 self.iface.messageBar().pushInfo(
                     terms["tool_locate"],
-                    f"No hay medidas M válidas en el {terms['identifier_lower']} '{via}'."
+                    f"No hay medidas M válidas en {terms['identifier_with_article']} '{via}'."
                 )
             return
 
@@ -610,7 +607,8 @@ class LocalizarPK:
         if not seleccionados:
             return
 
-        # Crear capa temporal (EPSG:4326)
+        # Crear capa temporal (EPSG:4326). En modo PK se exporta PK/PK_NUM;
+        # en modo M bruto se evita cualquier campo PK.
         terms = output_terms(self.output_mode)
         vl = QgsVectorLayer(f"Point?crs=EPSG:4326", terms["located_layer"], "memory")
         pr = vl.dataProvider()

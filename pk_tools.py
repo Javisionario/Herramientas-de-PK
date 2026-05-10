@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QToolButton, QMenu, QStyle
-from qgis.PyQt.QtCore import Qt,QSize
+from qgis.PyQt.QtCore import Qt, QSize
 
-from . import resources_rc
+from . import resources_rc  # carga los recursos Qt compilados
 from .tools.identificar_pk import IdentificarPK
 from .tools.localizar_pk import LocalizarPK
 from .tools.distancia_pk import DistanciaPK
@@ -18,7 +18,7 @@ class PKToolsPlugin:
         self.distancia = DistanciaPK(iface)
 
         self.toolbar = None
-        self.actions = []  # por si quieres usarlo después
+        self.actions = []  # mantiene vivas las acciones mientras el plugin esta cargado
 
     def initGui(self):
         """Crear la barra de herramientas propia del plugin y sus botones."""
@@ -27,10 +27,10 @@ class PKToolsPlugin:
         self.toolbar = self.iface.addToolBar("PK Tools")
         self.toolbar.setObjectName("PKTools")
 
-        # Identificar PK (checkable)
+        # Identificar (checkable)
         act_id = QAction(
             QIcon(":/plugins/pk_tools/icons/identificar.png"),
-            "Identificar PK",
+            "Identificar",
             self.iface.mainWindow()
         )
         act_id.setCheckable(True)
@@ -40,15 +40,15 @@ class PKToolsPlugin:
         self.toolbar.addAction(act_id)
         self.actions.append(act_id)
 
-        # Localizar PK (con menú desplegable propio, ya lo crea localizar_pk)
+        # Localizar (con menú desplegable propio, ya lo crea localizar_pk)
         act_loc = self.localizar.create_action()
         self.toolbar.addAction(act_loc)
         self.actions.append(act_loc)
 
-        # Distancia PK (checkable)
+        # Distancia (checkable)
         act_dist = QAction(
             QIcon(":/plugins/pk_tools/icons/distancia.png"),
-            "Distancia PK",
+            "Distancia",
             self.iface.mainWindow()
         )
         act_dist.setCheckable(True)
@@ -62,13 +62,13 @@ class PKToolsPlugin:
         menu_button = QToolButton(self.iface.mainWindow())
         menu_button.setPopupMode(QToolButton.InstantPopup)
         menu_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        menu_button.setAutoRaise(True)  # estilo plano, como los demás
+        menu_button.setAutoRaise(True)
 
-        # Icono estándar de Qt para "toolbar overflow" / menú
+        # Icono estandar de Qt para "toolbar overflow" / menu
         std_icon = self.iface.mainWindow().style().standardIcon(QStyle.SP_ToolBarVerticalExtensionButton)
         menu_button.setIcon(std_icon)
-        menu_button.setIconSize(QSize(12, 12))  # icono más pequeño que los demás
-        menu_button.setFixedWidth(18)           # ancho muy contenido
+        menu_button.setIconSize(QSize(12, 12))
+        menu_button.setFixedWidth(18)
         menu_button.setToolTip("Opciones PK Tools")
 
         # Menú de opciones
@@ -78,24 +78,10 @@ class PKToolsPlugin:
         options_menu.addAction(act_cfg)
 
         menu_button.setMenu(options_menu)
-        
-        '''
-        menu_button = QToolButton(self.iface.mainWindow())
-        menu_button.setPopupMode(QToolButton.InstantPopup)
-        menu_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        menu_button.setToolTip("Opciones PK Tools")
-
-        options_menu = QMenu(menu_button)
-        act_cfg = QAction("Configuración PK Tools", self.iface.mainWindow())
-        act_cfg.triggered.connect(lambda: show_settings_dialog(self.iface))
-        options_menu.addAction(act_cfg)
-
-        menu_button.setMenu(options_menu)
-        '''
         # Añadimos el botón de flecha al final de la toolbar
         self.toolbar.addWidget(menu_button)
 
-        # Guardamos referencias por si te hicieran falta
+        # Guardamos referencias para que Qt no destruya el menu ni la accion.
         self.actions.append(act_cfg)
         self.menu_button = menu_button
         self.options_menu = options_menu

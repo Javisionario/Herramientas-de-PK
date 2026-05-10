@@ -43,8 +43,8 @@ class DistanciaPK:
         import os
         icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
         icon = QIcon(icon_path)
-        self.action = QAction(icon, "Medir Distancia PK", self.iface.mainWindow())
-        self.action.setToolTip("Mide distancia entre dos PKs sobre la misma vía")
+        self.action = QAction(icon, "Distancia", self.iface.mainWindow())
+        self.action.setToolTip("Medir entre dos posiciones sobre la misma geometría")
         self.action.setCheckable(True)
         self.action.toggled.connect(self.toggle_tool)
         self.iface.addToolBarIcon(self.action)
@@ -232,7 +232,7 @@ class DistanciaTool(QgsMapTool):
             return 0.0, False
 
     def _visual_distance_px(self, map_pt_a, map_pt_b):
-        """Return the visual distance between two map CRS points in screen pixels."""
+        """Calcula distancia visual en pixeles entre dos puntos en CRS del mapa."""
         try:
             to_pixel = self.canvas.mapSettings().mapToPixel()
             a = to_pixel.transform(float(map_pt_a.x()), float(map_pt_a.y()))
@@ -331,7 +331,7 @@ class DistanciaTool(QgsMapTool):
                 self.click_count = 1
 
             else:
-                # Segundo punto sobre la MISMA geometría (first_feat)
+                # Segundo punto sobre la MISMA geometria seleccionada con el primer clic.
                 geom = self.first_feat.geometry()
                 near_layer = geom.nearestPoint(QgsGeometry.fromPointXY(QgsPointXY(layer_pt)))
                 proj2_map = near_layer.asPoint()
@@ -354,12 +354,14 @@ class DistanciaTool(QgsMapTool):
                 dist_lineal = abs(self.line_distances[1] - self.line_distances[0]) # metros
                 dist_lineal_km = dist_lineal / 1000.0
 
-                # Nombre de la vía usando el campo configurado
+                # Nombre del identificador usando el campo configurado.
+                terms = output_terms(self.output_mode)
+                unknown_label = f"{terms['identifier']} desconocido"
                 try:
                     val = self.first_feat[self.id_field]
-                    nombre_via = val if val not in (None, "") else "Vía desconocida"
+                    nombre_via = val if val not in (None, "") else unknown_label
                 except Exception:
-                    nombre_via = "Vía desconocida"
+                    nombre_via = unknown_label
 
                 self.callback(
                     nombre_via,
@@ -384,15 +386,17 @@ class DistanciaTool(QgsMapTool):
             log_exception("Error al calcular Distancia PK", e)
             self.iface.messageBar().pushMessage(
                 "Distancia",
-                f"Error al calcular: {e}",
+                "Error inesperado al calcular la distancia.",
                 level=Qgis.Warning
             )
 
     def _compute_pk_and_dist(self, geom_line, proj_pt_layer):
         """
         Devuelve:
-          - pk_km: PK interpolado en km, según valores M y unidades configuradas.
-          - dist_click_m: distancia acumulada a lo largo de la línea, en metros.
+          - pk_km: PK interno en km, interpolado desde los valores M originales.
+          - dist_click_m: distancia acumulada sobre la misma feature, en metros.
+
+        Deliberadamente no reconstruye rutas ni salta entre features partidas.
         """
         dist_click = geom_line.lineLocatePoint(proj_pt_layer)
         verts = list(geom_line.vertices())

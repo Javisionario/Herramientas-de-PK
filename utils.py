@@ -1,44 +1,46 @@
 # -*- coding: utf-8 -*-
 """
-Small shared helpers for PK Tools.
+Utilidades compartidas de PK Tools.
 
-The core convention is:
-  - raw M values keep the units configured by the user ("m" or "km")
-  - PK values used internally by the tools are expressed in kilometers
-  - display strings are built at the edge of the UI
+Convenciones internas:
+  - Los valores M brutos conservan las unidades configuradas por el usuario.
+  - Los valores PK internos se expresan en kilometros.
+  - Los textos visibles se generan al final, cerca de cada interfaz.
 """
 
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 VALID_M_UNITS = ("m", "km")
 VALID_OUTPUT_MODES = ("pk", "raw_m")
-LOG_TAG = "PK Tools"
+LOG_TAG = "PK_tools"
 
 
 class PKParseError(ValueError):
-    """Raised when a user-entered PK cannot be parsed."""
+    """Error de validacion de una entrada de PK o medida."""
 
 
 def normalize_m_units(m_units):
-    """Return a supported M unit value."""
+    """Devuelve una unidad M soportada."""
     return m_units if m_units in VALID_M_UNITS else "m"
 
 
 def normalize_output_mode(output_mode):
-    """Return a supported output display mode."""
+    """Devuelve un modo de salida soportado."""
     return output_mode if output_mode in VALID_OUTPUT_MODES else "pk"
 
 
 def output_terms(output_mode):
-    """Return UI terms adapted to the selected display mode."""
+    """Centraliza terminos visibles y campos de exportacion segun el modo."""
     if normalize_output_mode(output_mode) == "raw_m":
         return {
             "identifier": "Identificador",
             "identifier_lower": "identificador",
+            "identifier_prompt": "un identificador",
+            "identifier_with_article": "el identificador",
             "measure": "Medida",
             "tool_locate": "Localizar medida",
-            "located_layer": "Localizacion medidas M",
-            "identified_layer": "Identificacion medidas M",
+            "located_layer": "Localización de medidas M",
+            "identified_layer": "Identificación de medidas M",
             "id_field": "IDENTIFICADOR",
             "value_field": "M_RAW",
             "pk_number_field": "PK_NUM",
@@ -46,10 +48,12 @@ def output_terms(output_mode):
     return {
         "identifier": "Vía",
         "identifier_lower": "vía",
+        "identifier_prompt": "una vía",
+        "identifier_with_article": "la vía",
         "measure": "PK",
         "tool_locate": "Localizar PK",
         "located_layer": "Localización de PKs",
-        "identified_layer": "Identificacion PKs",
+        "identified_layer": "Identificación de PKs",
         "id_field": "VIA",
         "value_field": "PK",
         "pk_number_field": "PK_NUM",
@@ -57,7 +61,7 @@ def output_terms(output_mode):
 
 
 def log_exception(context, exc=None):
-    """Write technical details to the QGIS log without showing them to users."""
+    """Registra detalles tecnicos en QGIS sin mostrarlos en banners."""
     message = str(context)
     if exc is not None:
         message = f"{message}: {exc}"
@@ -72,27 +76,27 @@ def _decimal_from_value(value, field_name="valor"):
     try:
         dec = Decimal(str(value).strip().replace(",", "."))
     except (InvalidOperation, AttributeError):
-        raise PKParseError(f"El {field_name} no es un numero valido.")
+        raise PKParseError(f"El {field_name} no es un número válido.")
     if not dec.is_finite():
-        raise PKParseError(f"El {field_name} no es un numero valido.")
+        raise PKParseError(f"El {field_name} no es un número válido.")
     return dec
 
 
 def round_half_up_to_int(value):
-    """Round a Decimal/numeric value to the nearest integer, halves upwards."""
+    """Redondea al entero mas cercano, con los medios hacia arriba."""
     dec = value if isinstance(value, Decimal) else _decimal_from_value(value)
     return int(dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def raw_m_to_pk_km(raw_m, m_units="m"):
-    """Convert a raw M value to kilometers according to the configured units."""
+    """Convierte un valor M bruto al PK interno en kilometros."""
     units = normalize_m_units(m_units)
     value = float(raw_m)
     return value / 1000.0 if units == "m" else value
 
 
 def pk_km_to_raw_m(pk_km, m_units="m"):
-    """Convert an internal PK value in kilometers to raw M units."""
+    """Convierte un PK interno en kilometros a unidades M brutas."""
     units = normalize_m_units(m_units)
     value = float(pk_km)
     return value * 1000.0 if units == "m" else value
@@ -100,10 +104,10 @@ def pk_km_to_raw_m(pk_km, m_units="m"):
 
 def format_pk(value, units="km", km_width=0):
     """
-    Format a PK as km+mmm.
+    Formatea un PK como km+mmm.
 
-    The value is converted to integer meters first and then normalized with
-    divmod, which avoids outputs such as 9+1000.
+    Primero convierte a metros enteros y despues usa divmod. Asi se evitan
+    salidas como 9+1000 cuando el redondeo cruza de kilometro.
     """
     source_units = normalize_m_units(units)
     dec = _decimal_from_value(value)
@@ -121,9 +125,9 @@ def format_pk(value, units="km", km_width=0):
 
 def parse_pk_text(text):
     """
-    Parse a PK entered by the user and return kilometers.
+    Interpreta un PK introducido por el usuario y devuelve kilometros.
 
-    Accepted examples:
+    Ejemplos aceptados:
       10       -> 10.000 km
       150.500  -> 150.500 km
       150,500  -> 150.500 km
@@ -154,39 +158,15 @@ def parse_pk_text(text):
 
 
 def parse_raw_m_text(text):
-    """Parse a raw M/measure value entered by the user."""
+    """Interpreta una medida M bruta introducida por el usuario."""
     raw = str(text).strip()
     if not raw:
         raise PKParseError("Introduce una medida.")
     return float(_decimal_from_value(raw, "medida"))
 
 
-def parse_pk_components(km_text, meters_text=None):
-    """
-    Parse the legacy Localizar PK two-field UI.
-
-    The first field may contain a complete PK (for example 150+500). When the
-    second field is used, it is interpreted as meters added to the first field,
-    preserving the historical behavior.
-    """
-    first = str(km_text).strip()
-    second = "" if meters_text is None else str(meters_text).strip()
-
-    if not second or second in ("0", "000"):
-        return parse_pk_text(first)
-
-    if "+" in first:
-        raise PKParseError("Si usas formato km+metros, deja el campo Metros en 000.")
-
-    km = _decimal_from_value(first, "kilometro")
-    meters = _decimal_from_value(second, "metro")
-    if meters < 0:
-        raise PKParseError("Los metros del PK no pueden ser negativos.")
-    return float(km + meters / Decimal("1000"))
-
-
 def format_number_compact(value, decimals=3):
-    """Format a number without useless trailing zeroes."""
+    """Formatea un numero sin ceros finales innecesarios."""
     number = float(value)
     if abs(number - round(number)) < 10 ** -decimals:
         return str(int(round(number)))
@@ -194,39 +174,14 @@ def format_number_compact(value, decimals=3):
 
 
 def format_raw_m(raw_m, m_units="m", decimals=3, include_unit=True):
-    """Format a raw M value with its configured units."""
+    """Formatea un valor M bruto con sus unidades configuradas."""
     units = normalize_m_units(m_units)
     text = format_number_compact(raw_m, decimals)
     return f"{text} {units}" if include_unit else text
 
 
-def format_pk_value(pk_km, include_decimal=True):
-    """Format the standard PK display value."""
-    pk_text = format_pk(pk_km, units="km")
-    if include_decimal:
-        return f"{pk_text} ({float(pk_km):.3f} km)"
-    return pk_text
-
-
-def format_output_value(raw_m=None, pk_km=None, m_units="m", output_mode="pk"):
-    """
-    Build the final user-facing value.
-
-    output_mode is intentionally simple for now. It prepares the code for a
-    future raw-M display option without changing the current UI behavior.
-    """
-    if pk_km is None and raw_m is not None:
-        pk_km = raw_m_to_pk_km(raw_m, m_units)
-
-    output_mode = normalize_output_mode(output_mode)
-    if output_mode == "raw_m" and raw_m is not None:
-        return f"M {format_raw_m(raw_m, m_units)}"
-
-    return f"PK {format_pk_value(pk_km)}"
-
-
 def format_value_for_mode(raw_m, m_units="m", output_mode="pk", for_button=False):
-    """Format a raw M value as either PK text or raw-M text."""
+    """Genera el texto visible de un valor M segun el modo de salida."""
     output_mode = normalize_output_mode(output_mode)
     if output_mode == "raw_m":
         if for_button:
@@ -237,28 +192,28 @@ def format_value_for_mode(raw_m, m_units="m", output_mode="pk", for_button=False
 
 
 def format_pk_export_text(raw_m, m_units="m"):
-    """Format a raw M value as km+mmm text, without the PK prefix."""
+    """Formatea PK para exportacion, sin prefijo: 150+500."""
     return format_pk(raw_m_to_pk_km(raw_m, m_units), units="km")
 
 
 def pk_numeric_km(raw_m, m_units="m"):
-    """Return the PK numeric value in km rounded to 3 decimals."""
+    """Devuelve PK_NUM en kilometros, redondeado a 3 decimales."""
     dec = Decimal(str(raw_m_to_pk_km(raw_m, m_units)))
     return float(dec.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP))
 
 
 def raw_m_export_value(raw_m):
-    """Return a raw M value for numeric export fields."""
+    """Devuelve M_RAW como valor numerico para exportacion."""
     return float(raw_m)
 
 
 def interval_tolerance_to_raw(tolerance_m=10.0, m_units="m"):
-    """Convert a tolerance expressed in meters to the configured raw M units."""
+    """Convierte una tolerancia en metros a las unidades M configuradas."""
     return float(tolerance_m) if normalize_m_units(m_units) == "m" else float(tolerance_m) / 1000.0
 
 
 def merge_m_intervals(intervals, tolerance=0.0):
-    """Sort and merge M coverage intervals."""
+    """Ordena y fusiona intervalos reales de cobertura M."""
     normalized = [
         (min(float(a), float(b)), max(float(a), float(b)))
         for a, b in intervals
@@ -280,10 +235,10 @@ def merge_m_intervals(intervals, tolerance=0.0):
 
 def coverage_status(target_m, intervals, tolerance=0.0):
     """
-    Classify a raw M target against real coverage intervals.
+    Clasifica una medida frente a los intervalos reales de cobertura M.
 
-    Returns a dict with status: covered, gap, below, above or empty.
-    For gap/below/above, nearest_m contains the closest available endpoint.
+    No usa solo min/max global: trabaja con tramos reales fusionados para
+    detectar huecos internos y extremos fuera de rango.
     """
     target = float(target_m)
     merged = merge_m_intervals(intervals, tolerance)
@@ -316,7 +271,7 @@ def coverage_status(target_m, intervals, tolerance=0.0):
 
 
 def nearest_interval_endpoint(target_m, intervals):
-    """Return the closest start/end endpoint from a list of intervals."""
+    """Devuelve el extremo de intervalo mas cercano a la medida buscada."""
     endpoints = []
     for start, end in intervals:
         endpoints.extend([float(start), float(end)])
@@ -327,7 +282,7 @@ def nearest_interval_endpoint(target_m, intervals):
 
 
 def find_layer_by_config(cfg):
-    """Find the configured layer by id, falling back to the saved name."""
+    """Busca la capa por id y usa el nombre como fallback de configuraciones antiguas."""
     from qgis.core import QgsProject, QgsVectorLayer
 
     layer_id = (cfg.get("layer_id") or "").strip()
@@ -346,28 +301,27 @@ def find_layer_by_config(cfg):
 
 
 def resolve_configured_layer(cfg, default_id_field="ID_ROAD"):
-    """Return (layer, id_field, error_message) for the configured line-M layer."""
+    """Devuelve (capa, campo_id, error) para la capa lineal M configurada."""
     from qgis.core import QgsWkbTypes
 
     layer_name = (cfg.get("layer_name") or "").strip()
     id_field = (cfg.get("id_field") or default_id_field).strip() or default_id_field
 
     if not (cfg.get("layer_id") or layer_name):
-        return None, id_field, "No hay capa de trabajo configurada."
+        return None, id_field, "No hay capa configurada."
 
     layer = find_layer_by_config(cfg)
     if layer is None:
-        name = layer_name or cfg.get("layer_id") or "configurada"
-        return None, id_field, f"No se ha encontrado la capa '{name}'. Revisa la configuración."
+        return None, id_field, "No se ha encontrado la capa configurada."
 
     if layer.geometryType() != QgsWkbTypes.LineGeometry:
-        return None, id_field, f"La capa '{layer.name()}' no es lineal."
+        return None, id_field, "La capa configurada no es lineal."
 
     if not QgsWkbTypes.hasM(layer.wkbType()):
-        return None, id_field, f"La capa '{layer.name()}' no tiene geometría M."
+        return None, id_field, "La capa seleccionada no contiene geometría M."
 
     if layer.fields().indexOf(id_field) == -1:
-        return None, id_field, f"La capa '{layer.name()}' no tiene el campo '{id_field}'."
+        return None, id_field, f"La capa configurada no tiene el campo '{id_field}'."
 
     return layer, id_field, None
 
@@ -382,11 +336,11 @@ def _field_value_expression(field_name, value):
 
 def features_by_field_value(layer, field_name, value):
     """
-    Fetch features matching a field value using provider filtering.
+    Obtiene features con el valor exacto del identificador.
 
-    Falls back to an in-memory scan only if the provider expression returns no
-    features, which keeps Localizar fast on normal indexed/provider-supported
-    layers while preserving compatibility with awkward providers.
+    Primero intenta filtro de proveedor para capas grandes. Si falla por tipo
+    de campo, caracteres especiales o proveedor limitado, registra el detalle
+    y cae a un recorrido exacto en memoria sin normalizar mayusculas/minusculas.
     """
     field_index = layer.fields().indexOf(field_name)
     if field_index < 0:
@@ -401,7 +355,7 @@ def features_by_field_value(layer, field_name, value):
             return features
     except Exception as exc:
         log_exception(
-            f"No se pudo filtrar por expresion en '{field_name}' con valor '{value}'",
+            f"No se pudo filtrar por expresión en '{field_name}' con valor '{value}'",
             exc,
         )
 
