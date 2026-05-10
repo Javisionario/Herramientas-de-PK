@@ -133,16 +133,27 @@ class LocalizarPK:
         # A partir de aquí, self.layer está validada
         field = self.id_field
         field_index = self.layer.fields().indexOf(field)
+        try:
+            unique_values = list(self.layer.uniqueValues(field_index))
+        except Exception as exc:
+            log_exception("No se pudieron cargar valores únicos del identificador", exc)
+            unique_values = []
+            for feat in self.layer.getFeatures():
+                try:
+                    unique_values.append(feat[field_index])
+                except Exception:
+                    pass
+
         road_values = {}
         road_names = sorted(
             {
                 str(value).strip()
-                for value in self.layer.uniqueValues(field_index)
+                for value in unique_values
                 if value not in (None, "") and str(value).strip()
             },
             key=str.casefold
         )
-        for value in self.layer.uniqueValues(field_index):
+        for value in unique_values:
             text = str(value).strip()
             if text:
                 road_values.setdefault(text, value)

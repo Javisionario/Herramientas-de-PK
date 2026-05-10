@@ -387,7 +387,7 @@ class DistanciaTool(QgsMapTool):
                 if geom is None or self.first_part_verts is None:
                     self.iface.messageBar().pushMessage(
                         tool_title,
-                        "No hay geometrÃ­a inicial vÃ¡lida.",
+                        "No hay geometría inicial válida.",
                         level=Qgis.Warning
                     )
                     self.reset()
