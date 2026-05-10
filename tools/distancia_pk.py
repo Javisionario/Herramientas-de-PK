@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+from math import hypot
+
 from qgis.PyQt.QtGui import QIcon, QColor
 from qgis.PyQt.QtWidgets import QAction, QPushButton, QApplication
 from qgis.PyQt.QtCore import Qt
@@ -7,27 +9,25 @@ from qgis.core import (
     QgsPointXY,
     QgsGeometry,
     QgsCoordinateTransform,
+    QgsDistanceArea,
     QgsProject,
-    QgsCoordinateReferenceSystem,
-    QgsWkbTypes,
-    QgsVectorLayer,
     QgsSpatialIndex,
     Qgis
 )
 
-from ..settings import read_current_settings
+from ..settings import DEFAULT_CLICK_TOLERANCE_PX, ensure_settings_configured, read_current_settings
+from ..utils import (
+    format_raw_m,
+    format_value_for_mode,
+    log_exception,
+    output_terms,
+    pk_km_to_raw_m,
+    raw_m_to_pk_km,
+    resolve_configured_layer,
+)
 
 # Campo por defecto histórico (fallback si no hay settings)
 EXPECTED_FIELD = "ID_ROAD"
-
-
-def formato_pk(pk_total):
-    km = int(pk_total)
-    m = int(round((pk_total - km) * 1000))
-    if m == 1000:
-        km += 1
-        m = 0
-    return f"{km:02d}+{m:03d}"
 
 
 class DistanciaPK:
@@ -78,58 +78,21 @@ class DistanciaPK:
         """
         Activa la herramienta usando la capa/campo/unidades definidos en settings.
         """
+        tool_title = "Distancia PK"
         try:
+            if not ensure_settings_configured(self.iface):
+                return False
+
             cfg = read_current_settings()
-            layer_name = cfg.get("layer_name") or ""
-            id_field = cfg.get("id_field") or EXPECTED_FIELD
             m_units = cfg.get("m_units") or "m"
-
-            if not layer_name:
+            output_mode = cfg.get("output_mode") or "pk"
+            click_tolerance_px = cfg.get("click_tolerance_px", DEFAULT_CLICK_TOLERANCE_PX)
+            tool_title = "Distancia M" if output_mode == "raw_m" else "Distancia PK"
+            layer, id_field, layer_error = resolve_configured_layer(cfg, EXPECTED_FIELD)
+            if layer_error:
                 self.iface.messageBar().pushMessage(
-                    "Distancia PK",
-                    "No hay capa de trabajo configurada. Abre 'Configuración PK Tools' para definirla.",
-                    level=Qgis.Info
-                )
-                return False
-
-            # Buscar la capa por nombre
-            layer = None
-            for lyr in QgsProject.instance().mapLayers().values():
-                if isinstance(lyr, QgsVectorLayer) and lyr.name() == layer_name:
-                    layer = lyr
-                    break
-
-            if not layer:
-                self.iface.messageBar().pushMessage(
-                    "Distancia PK",
-                    f"No se ha encontrado la capa '{layer_name}'. Revisa la configuración de PK Tools.",
-                    level=Qgis.Warning
-                )
-                return False
-
-            # Validar tipo de geometría
-            if layer.geometryType() != QgsWkbTypes.LineGeometry:
-                self.iface.messageBar().pushMessage(
-                    "Distancia PK",
-                    f"La capa '{layer_name}' no es lineal.",
-                    level=Qgis.Warning
-                )
-                return False
-
-            # Validar presencia de M
-            if not QgsWkbTypes.hasM(layer.wkbType()):
-                self.iface.messageBar().pushMessage(
-                    "Distancia PK",
-                    f"La capa '{layer_name}' no tiene geometría M.",
-                    level=Qgis.Warning
-                )
-                return False
-
-            # Comprobar que existe el campo identificador
-            if layer.fields().indexOf(id_field) == -1:
-                self.iface.messageBar().pushMessage(
-                    "Distancia PK",
-                    f"La capa '{layer_name}' no tiene el campo '{id_field}'.",
+                    tool_title,
+                    layer_error,
                     level=Qgis.Warning
                 )
                 return False
@@ -142,37 +105,61 @@ class DistanciaPK:
             self.tool.index = QgsSpatialIndex(layer.getFeatures())
             self.tool.id_field = id_field
             self.tool.m_units = m_units
+            self.tool.output_mode = output_mode
+            try:
+                self.tool.click_tolerance_px = max(1, int(click_tolerance_px))
+            except Exception:
+                self.tool.click_tolerance_px = DEFAULT_CLICK_TOLERANCE_PX
+            self.tool.configure_distance_area(layer.crs())
             self.tool.reset()
 
             self.canvas.setMapTool(self.tool)
             return True
 
-        except Exception:
+        except Exception as exc:
+            log_exception("Error al activar Distancia PK", exc)
             self.iface.messageBar().pushMessage(
-                "Distancia PK",
+                tool_title,
                 "Error inesperado al seleccionar capa.",
                 level=Qgis.Warning
             )
             return False
 
-    def show_distance_message(self, nombre_via, pk1, pk2, dist_pk_km, dist_lineal_km):
+    def show_distance_message(self, nombre_via, pk1, pk2, dist_pk_km, dist_lineal_km,
+                              raw_m1=None, raw_m2=None, m_units="m", output_mode="pk",
+                              distance_reliable=True):
         # Cerrar mensaje anterior antes de crear uno nuevo
         self._close_messagebar()
 
-        pk1_str = formato_pk(pk1)
-        pk2_str = formato_pk(pk2)
+        if raw_m1 is None:
+            raw_m1 = pk_km_to_raw_m(pk1, m_units)
+        if raw_m2 is None:
+            raw_m2 = pk_km_to_raw_m(pk2, m_units)
+        value1 = format_value_for_mode(raw_m1, m_units, output_mode)
+        value2 = format_value_for_mode(raw_m2, m_units, output_mode)
+        terms = output_terms(output_mode)
+        if output_mode == "raw_m":
+            dist_label = "Dif. M"
+            dist_value = format_raw_m(abs(raw_m2 - raw_m1), m_units)
+        else:
+            dist_label = "Dist. PK"
+            dist_value = f"{dist_pk_km:.3f} km"
+        linear_text = f"{dist_lineal_km:.3f} km"
+        if not distance_reliable:
+            linear_text += " (aprox.)"
         texto = (
-            f"{nombre_via} | PK1: {pk1_str} · PK2: {pk2_str} | "
-            f"Dist. PK: {dist_pk_km:.3f} km · Dist. Lineal: {dist_lineal_km:.3f} km"
+            f"{terms['identifier']}: {nombre_via} | P1: {value1} · P2: {value2} | "
+            f"{dist_label}: {dist_value} · Dist. Lineal: {linear_text}"
         )
 
-        msg = self.iface.messageBar().createMessage("Distancia PK", texto)
+        title = "Distancia M" if output_mode == "raw_m" else "Distancia PK"
+        msg = self.iface.messageBar().createMessage(title, texto)
 
-        btn_pk = QPushButton("Copiar distancia PK")
-        btn_pk.clicked.connect(lambda: QApplication.clipboard().setText(f"{dist_pk_km:.3f} km"))
+        btn_pk = QPushButton(f"Copiar {dist_label}")
+        btn_pk.clicked.connect(lambda: QApplication.clipboard().setText(dist_value))
 
         btn_lin = QPushButton("Copiar distancia lineal")
-        btn_lin.clicked.connect(lambda: QApplication.clipboard().setText(f"{dist_lineal_km:.3f} km"))
+        btn_lin.clicked.connect(lambda: QApplication.clipboard().setText(linear_text))
 
         msg.layout().addWidget(btn_pk)
         msg.layout().addWidget(btn_lin)
@@ -217,7 +204,50 @@ class DistanciaTool(QgsMapTool):
         self.index = None
         self.id_field = EXPECTED_FIELD   # se sobreescribe desde settings
         self.m_units = "m"               # "m" (por defecto) o "km"
+        self.output_mode = "pk"
+        self.distance_area = None
+        self.distance_reliable = True
+        self.click_tolerance_px = DEFAULT_CLICK_TOLERANCE_PX
         self.reset()
+
+    def configure_distance_area(self, crs):
+        self.distance_area = QgsDistanceArea()
+        self.distance_area.setSourceCrs(crs, QgsProject.instance().transformContext())
+        ellipsoid = QgsProject.instance().ellipsoid() or "WGS84"
+        self.distance_area.setEllipsoid(ellipsoid)
+        self.distance_reliable = True
+
+    def _measure_line_m(self, p0, p1):
+        try:
+            if self.distance_area is not None:
+                return self.distance_area.measureLine(QgsPointXY(p0), QgsPointXY(p1)), True
+        except Exception as exc:
+            log_exception("No se pudo medir con QgsDistanceArea", exc)
+
+        try:
+            seg = QgsGeometry.fromPolylineXY([QgsPointXY(p0), QgsPointXY(p1)])
+            return seg.length(), False
+        except Exception as exc:
+            log_exception("No se pudo medir distancia lineal", exc)
+            return 0.0, False
+
+    def _visual_distance_px(self, map_pt_a, map_pt_b):
+        """Return the visual distance between two map CRS points in screen pixels."""
+        try:
+            to_pixel = self.canvas.mapSettings().mapToPixel()
+            a = to_pixel.transform(float(map_pt_a.x()), float(map_pt_a.y()))
+            b = to_pixel.transform(float(map_pt_b.x()), float(map_pt_b.y()))
+            return hypot(float(a.x()) - float(b.x()), float(a.y()) - float(b.y()))
+        except Exception as exc:
+            log_exception("No se pudo calcular distancia visual del clic", exc)
+
+        try:
+            map_units_per_pixel = self.canvas.mapSettings().mapUnitsPerPixel()
+            if map_units_per_pixel > 0:
+                return QgsPointXY(map_pt_a).distance(QgsPointXY(map_pt_b)) / map_units_per_pixel
+        except Exception as exc:
+            log_exception("No se pudo calcular distancia visual por mapUnitsPerPixel", exc)
+        return 0.0
 
     def reset(self):
         if hasattr(self, 'markers'):
@@ -228,6 +258,7 @@ class DistanciaTool(QgsMapTool):
                     pass
         self.markers = []
         self.pk_values = []
+        self.raw_m_values = []
         self.line_distances = []
         self.first_feat = None
         self.click_count = 0
@@ -245,9 +276,10 @@ class DistanciaTool(QgsMapTool):
 
     def _process_click(self, click_pt_map):
         try:
+            tool_title = "Distancia M" if self.output_mode == "raw_m" else "Distancia PK"
             if not self.layer or not self.index:
                 self.iface.messageBar().pushMessage(
-                    "Distancia PK",
+                    tool_title,
                     "No hay capa válida asignada.",
                     level=Qgis.Warning
                 )
@@ -277,14 +309,15 @@ class DistanciaTool(QgsMapTool):
 
                 if not closest_feat:
                     self.iface.messageBar().pushMessage(
-                        "Distancia PK",
+                        tool_title,
                         "No se encontró línea cercana.",
                         level=Qgis.Info
                     )
                     return
 
                 self.first_feat = closest_feat
-                pk1, dist1 = self._compute_pk_and_dist(closest_feat.geometry(), proj_pt_layer)
+                pk1, dist1, raw_m1, reliable1 = self._compute_pk_and_dist(closest_feat.geometry(), proj_pt_layer)
+                self.distance_reliable = reliable1
 
                 proj1_map = proj_pt_layer.asPoint()
                 if map_crs != layer_crs:
@@ -293,6 +326,7 @@ class DistanciaTool(QgsMapTool):
                 self._add_marker(proj1_map)
 
                 self.pk_values.append(pk1)
+                self.raw_m_values.append(raw_m1)
                 self.line_distances.append(dist1)
                 self.click_count = 1
 
@@ -300,21 +334,24 @@ class DistanciaTool(QgsMapTool):
                 # Segundo punto sobre la MISMA geometría (first_feat)
                 geom = self.first_feat.geometry()
                 near_layer = geom.nearestPoint(QgsGeometry.fromPointXY(QgsPointXY(layer_pt)))
-                pk2, dist2 = self._compute_pk_and_dist(geom, near_layer)
-
                 proj2_map = near_layer.asPoint()
                 if map_crs != layer_crs:
                     xf_to_map = QgsCoordinateTransform(layer_crs, map_crs, QgsProject.instance())
                     proj2_map = xf_to_map.transform(proj2_map)
+
+                offset_px = self._visual_distance_px(click_pt_map, proj2_map)
+                far_second_click = offset_px > self.click_tolerance_px
+                pk2, dist2, raw_m2, reliable2 = self._compute_pk_and_dist(geom, near_layer)
+
                 self._add_marker(proj2_map)
 
                 self.pk_values.append(pk2)
+                self.raw_m_values.append(raw_m2)
                 self.line_distances.append(dist2)
                 self.click_count = 2
 
                 dist_pk = abs(self.pk_values[1] - self.pk_values[0])               # km
-                dist_lineal = abs(self.line_distances[1] - self.line_distances[0]) # unidades de capa
-                # Se asume CRS en metros → pasa a km
+                dist_lineal = abs(self.line_distances[1] - self.line_distances[0]) # metros
                 dist_lineal_km = dist_lineal / 1000.0
 
                 # Nombre de la vía usando el campo configurado
@@ -329,12 +366,24 @@ class DistanciaTool(QgsMapTool):
                     self.pk_values[0],
                     self.pk_values[1],
                     dist_pk,
-                    dist_lineal_km
+                    dist_lineal_km,
+                    self.raw_m_values[0],
+                    self.raw_m_values[1],
+                    self.m_units,
+                    self.output_mode,
+                    self.distance_reliable and reliable2
                 )
+                if far_second_click:
+                    self.iface.messageBar().pushMessage(
+                        tool_title,
+                        "El segundo punto está lejos de la geometría seleccionada. Revisa la medición.",
+                        level=Qgis.Warning
+                    )
 
         except Exception as e:
+            log_exception("Error al calcular Distancia PK", e)
             self.iface.messageBar().pushMessage(
-                "Distancia PK",
+                "Distancia",
                 f"Error al calcular: {e}",
                 level=Qgis.Warning
             )
@@ -343,35 +392,41 @@ class DistanciaTool(QgsMapTool):
         """
         Devuelve:
           - pk_km: PK interpolado en km, según valores M y unidades configuradas.
-          - dist_click: distancia acumulada a lo largo de la línea (unidades del CRS).
+          - dist_click_m: distancia acumulada a lo largo de la línea, en metros.
         """
         dist_click = geom_line.lineLocatePoint(proj_pt_layer)
         verts = list(geom_line.vertices())
         if len(verts) < 2:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0, False
 
         cum = [0.0]
+        cum_measured = [0.0]
+        reliable = True
         for i in range(1, len(verts)):
             seg = QgsGeometry.fromPolylineXY([QgsPointXY(verts[i-1]), QgsPointXY(verts[i])])
             cum.append(cum[-1] + seg.length())
+            measured, segment_reliable = self._measure_line_m(verts[i-1], verts[i])
+            cum_measured.append(cum_measured[-1] + measured)
+            reliable = reliable and segment_reliable
 
         idx = next(
             (i for i in range(len(cum)-1) if cum[i] <= dist_click <= cum[i+1]),
             len(cum)-2
         )
 
-        # Conversión de M según configuración:
-        #   - "m": divide entre 1000 (M en metros)
-        #   - "km": no divide (M en kilómetros)
-        factor = 1000.0 if (self.m_units or "m") == "m" else 1.0
-        m1 = verts[idx].m() / factor
-        m2 = verts[idx+1].m() / factor
-
         start = cum[idx]
         seg_len = cum[idx+1] - start
         t = (dist_click - start) / seg_len if seg_len > 0 else 0.0
-        pk_km = m1 + t * (m2 - m1)
-        return pk_km, dist_click
+
+        m1_raw = verts[idx].m()
+        m2_raw = verts[idx+1].m()
+        if m1_raw is None or m2_raw is None:
+            raise ValueError("El tramo localizado no tiene medidas M válidas.")
+
+        m_raw = m1_raw + t * (m2_raw - m1_raw)
+        pk_km = raw_m_to_pk_km(m_raw, self.m_units)
+        dist_click_m = cum_measured[idx] + t * (cum_measured[idx+1] - cum_measured[idx])
+        return pk_km, dist_click_m, m_raw, reliable
 
     def _add_marker(self, map_pt):
         ring = QgsVertexMarker(self.canvas)

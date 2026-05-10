@@ -7,13 +7,12 @@ from . import resources_rc
 from .tools.identificar_pk import IdentificarPK
 from .tools.localizar_pk import LocalizarPK
 from .tools.distancia_pk import DistanciaPK
-from .settings import PKToolsSettings, show_settings_dialog
+from .settings import show_settings_dialog
 
 
 class PKToolsPlugin:
     def __init__(self, iface):
         self.iface = iface
-        self.settings_mgr = PKToolsSettings()
         self.identificar = IdentificarPK(iface)
         self.localizar = LocalizarPK(iface)
         self.distancia = DistanciaPK(iface)
@@ -36,7 +35,7 @@ class PKToolsPlugin:
         )
         act_id.setCheckable(True)
         act_id.toggled.connect(
-            lambda checked: self.identificar.run() if checked else self.identificar.deactivate()
+            lambda checked, action=act_id: self._toggle_identificar(action, checked)
         )
         self.toolbar.addAction(act_id)
         self.actions.append(act_id)
@@ -54,7 +53,7 @@ class PKToolsPlugin:
         )
         act_dist.setCheckable(True)
         act_dist.toggled.connect(
-            lambda checked: self.distancia.run() if checked else self.distancia.deactivate()
+            lambda checked, action=act_dist: self._toggle_distancia(action, checked)
         )
         self.toolbar.addAction(act_dist)
         self.actions.append(act_dist)
@@ -101,12 +100,40 @@ class PKToolsPlugin:
         self.menu_button = menu_button
         self.options_menu = options_menu
 
-        # Si no hay configuración previa, abrir el diálogo una vez
-        if not self.settings_mgr.has_config():
-            show_settings_dialog(self.iface)
+    def _uncheck_action(self, action):
+        action.blockSignals(True)
+        action.setChecked(False)
+        action.blockSignals(False)
+
+    def _toggle_identificar(self, action, checked):
+        if checked:
+            if not self.identificar.run():
+                self._uncheck_action(action)
+        else:
+            self.identificar.deactivate()
+
+    def _toggle_distancia(self, action, checked):
+        if checked:
+            if not self.distancia.run():
+                self._uncheck_action(action)
+        else:
+            self.distancia.deactivate()
 
     def unload(self):
         """Eliminar la barra de herramientas al desinstalar el plugin."""
+        try:
+            self.identificar.deactivate()
+        except Exception:
+            pass
+        try:
+            self.distancia.deactivate()
+        except Exception:
+            pass
+        try:
+            self.localizar._limpiar_marcadores()
+        except Exception:
+            pass
+
         if self.toolbar is not None:
             # Quitamos la toolbar completa, con todas sus acciones y widgets
             self.iface.mainWindow().removeToolBar(self.toolbar)

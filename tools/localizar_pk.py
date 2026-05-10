@@ -5,23 +5,46 @@ from qgis.PyQt.QtWidgets import (
     QLineEdit, QCompleter, QPushButton, QMenu, QApplication,
     QListWidget, QListWidgetItem, QDialogButtonBox
 )
-from qgis.PyQt.QtCore import QMimeData, QVariant
+from qgis.PyQt.QtCore import Qt, QMimeData, QVariant
 from qgis.gui import QgsVertexMarker
 from qgis.core import (
     QgsPointXY, QgsCoordinateTransform, QgsProject, QgsCoordinateReferenceSystem,
-    QgsWkbTypes, QgsVectorLayer, QgsFields, QgsField, QgsFeature, QgsGeometry,
+    QgsVectorLayer, QgsField, QgsFeature, QgsGeometry,
     Qgis
 )
-from ..settings import read_current_settings
+from ..settings import ensure_settings_configured, read_current_settings
+from ..utils import (
+    PKParseError,
+    coverage_status,
+    features_by_field_value,
+    format_pk_export_text,
+    format_value_for_mode,
+    interval_tolerance_to_raw,
+    log_exception,
+    nearest_interval_endpoint,
+    output_terms,
+    parse_pk_text,
+    parse_raw_m_text,
+    pk_numeric_km,
+    pk_km_to_raw_m,
+    raw_m_export_value,
+    raw_m_to_pk_km,
+    resolve_configured_layer,
+)
 
 # Campo por defecto histórico (fallback)
 EXPECTED_FIELD = "ID_ROAD"
 
 
-def formato_pk(pk_total):
-    km = int(pk_total)
-    m = int(round((pk_total - km) * 1000))
-    return f"{km}+{m:03d}"
+class RoadLineEdit(QLineEdit):
+    """Campo de vía que abre el listado completo con doble clic."""
+
+    def mouseDoubleClickEvent(self, event):
+        super().mouseDoubleClickEvent(event)
+        completer = self.completer()
+        if completer is not None:
+            completer.setCompletionPrefix("")
+            completer.complete()
 
 
 class LocalizarPK:
@@ -35,6 +58,9 @@ class LocalizarPK:
         self.layer = None
         self.id_field = EXPECTED_FIELD
         self.m_units = "m"   # "m" (por defecto) o "km"
+        self.output_mode = "pk"
+        self.current_msg = None
+        self.last_identifier = ""
 
     def create_action(self):
         icon = QIcon(":/plugins/pk_tools/icons/localizar.png")
@@ -72,55 +98,18 @@ class LocalizarPK:
         Abre el diálogo de localización usando la capa/campo/unidades definidos en settings.
         """
         try:
+            if not ensure_settings_configured(self.iface):
+                return
+
             cfg = read_current_settings()
-            layer_name = cfg.get("layer_name") or ""
-            id_field = cfg.get("id_field") or EXPECTED_FIELD
             m_units = cfg.get("m_units") or "m"
-
-            if not layer_name:
+            output_mode = cfg.get("output_mode") or "pk"
+            tool_title = output_terms(output_mode)["tool_locate"]
+            layer, id_field, layer_error = resolve_configured_layer(cfg, EXPECTED_FIELD)
+            if layer_error:
                 self.iface.messageBar().pushMessage(
-                    "Localizar PK",
-                    "No hay capa de trabajo configurada. Abre 'Configuración PK Tools' para definirla.",
-                    level=Qgis.Info
-                )
-                return
-
-            # Buscar capa por nombre
-            layer = None
-            for lyr in QgsProject.instance().mapLayers().values():
-                if isinstance(lyr, QgsVectorLayer) and lyr.name() == layer_name:
-                    layer = lyr
-                    break
-
-            if not layer:
-                self.iface.messageBar().pushMessage(
-                    "Localizar PK",
-                    f"No se ha encontrado la capa '{layer_name}'. Revisa la configuración de PK Tools.",
-                    level=Qgis.Warning
-                )
-                return
-
-            # Validar geometría lineal con M y campo identificador
-            if layer.geometryType() != QgsWkbTypes.LineGeometry:
-                self.iface.messageBar().pushMessage(
-                    "Localizar PK",
-                    f"La capa '{layer_name}' no es lineal.",
-                    level=Qgis.Warning
-                )
-                return
-
-            if not QgsWkbTypes.hasM(layer.wkbType()):
-                self.iface.messageBar().pushMessage(
-                    "Localizar PK",
-                    f"La capa '{layer_name}' no tiene geometría M.",
-                    level=Qgis.Warning
-                )
-                return
-
-            if layer.fields().indexOf(id_field) == -1:
-                self.iface.messageBar().pushMessage(
-                    "Localizar PK",
-                    f"La capa '{layer_name}' no tiene el campo '{id_field}'.",
+                    tool_title,
+                    layer_error,
                     level=Qgis.Warning
                 )
                 return
@@ -129,10 +118,12 @@ class LocalizarPK:
             self.layer = layer
             self.id_field = id_field
             self.m_units = m_units
+            self.output_mode = output_mode
 
-        except Exception:
+        except Exception as exc:
+            log_exception("Error al preparar Localizar", exc)
             self.iface.messageBar().pushMessage(
-                "Localizar PK",
+                "Localizar",
                 "Error inesperado al preparar la capa.",
                 level=Qgis.Warning
             )
@@ -140,40 +131,52 @@ class LocalizarPK:
 
         # A partir de aquí, self.layer está validada
         field = self.id_field
-        road_names = sorted({
-            f[field]
-            for f in self.layer.getFeatures()
-            if f[field]
-        })
+        field_index = self.layer.fields().indexOf(field)
+        road_values = {}
+        road_names = sorted(
+            {
+                str(value).strip()
+                for value in self.layer.uniqueValues(field_index)
+                if value not in (None, "") and str(value).strip()
+            },
+            key=str.casefold
+        )
+        for value in self.layer.uniqueValues(field_index):
+            text = str(value).strip()
+            if text:
+                road_values.setdefault(text, value)
+        terms = output_terms(self.output_mode)
 
         # ----- Construcción del diálogo -----
         dlg = QDialog(self.iface.mainWindow())
-        dlg.setWindowTitle("Localizar PK")
+        dlg.setWindowTitle(terms["tool_locate"])
         vbox = QVBoxLayout()
 
-        # Carretera
+        # Identificador
         h1 = QHBoxLayout()
-        h1.addWidget(QLabel("Carretera:"))
-        self.le_road = QLineEdit()
+        h1.addWidget(QLabel(f"{terms['identifier']}:"))
+        self.le_road = RoadLineEdit(self.last_identifier)
         completer = QCompleter(road_names)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
         self.le_road.setCompleter(completer)
         h1.addWidget(self.le_road)
         vbox.addLayout(h1)
 
-        # PK (km + m)
+        # Medida
         h2 = QHBoxLayout()
-        h2.addWidget(QLabel("Kilómetros:"))
-        self.le_km = QLineEdit("0")
-        h2.addWidget(self.le_km)
-        h2.addWidget(QLabel("Metros (+):"))
-        self.le_m = QLineEdit("000")
-        h2.addWidget(self.le_m)
+        h2.addWidget(QLabel(f"{terms['measure']}:"))
+        self.le_pk = QLineEdit()
+        placeholder = "Ej.: 150 | 150.500 | 150+500" if self.output_mode == "pk" else "Ej.: 150500"
+        self.le_pk.setPlaceholderText(placeholder)
+        self.le_pk.returnPressed.connect(dlg.accept)
+        h2.addWidget(self.le_pk)
         vbox.addLayout(h2)
 
         # Botones
         hbtn = QHBoxLayout()
         hbtn.addStretch()
-        btn_ok = QPushButton("OK")
+        btn_ok = QPushButton("Localizar")
         btn_cancel = QPushButton("Cancelar")
         btn_ok.clicked.connect(dlg.accept)
         btn_cancel.clicked.connect(dlg.reject)
@@ -185,102 +188,194 @@ class LocalizarPK:
         if dlg.exec_() != QDialog.Accepted:
             return
 
-        via = self.le_road.text().strip()
+        via_text = self.le_road.text().strip()
+        if not via_text:
+            self.iface.messageBar().pushWarning(terms["tool_locate"], f"Introduce un {terms['identifier_lower']}.")
+            return
+        via = self._resolve_road_name(via_text, road_names)
+        if via is None:
+            self.iface.messageBar().pushInfo(
+                terms["tool_locate"],
+                "Hay varios valores similares. Selecciona el valor exacto."
+            )
+            return
+        via_value = road_values.get(via, via)
+        self.last_identifier = via
+
         try:
-            km = float(self.le_km.text())
-            m = int(self.le_m.text())
-        except ValueError:
-            self.iface.messageBar().pushWarning("Localizar PK", "Valores de km o m inválidos.")
+            if self.output_mode == "raw_m":
+                pk_total_km = raw_m_to_pk_km(parse_raw_m_text(self.le_pk.text()), self.m_units)
+            else:
+                pk_total_km = parse_pk_text(self.le_pk.text())
+        except PKParseError as err:
+            self.iface.messageBar().pushWarning(terms["tool_locate"], str(err))
             return
 
-        pk_total_km = km + m / 1000.0
-        self.locate(via, pk_total_km)
+        self.locate(via, pk_total_km, via_value)
+
+    def _field_value_text(self, value):
+        return "" if value in (None, "") else str(value).strip()
+
+    def _resolve_road_name(self, text, road_names):
+        """Respeta el valor real y solo corrige mayúsculas si no hay ambigüedad."""
+        typed = str(text).strip()
+        if typed in road_names:
+            return typed
+
+        matches = [name for name in road_names if name.casefold() == typed.casefold()]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return None
+        return typed
+
+    def _geometry_parts_vertices(self, geom):
+        """Devuelve vertices por parte, evitando unir partes multipart."""
+        try:
+            parts = list(geom.constParts())
+        except Exception:
+            parts = []
+
+        if parts:
+            for part in parts:
+                verts = list(part.vertices())
+                if len(verts) >= 2:
+                    yield verts
+            return
+
+        verts = list(geom.vertices())
+        if len(verts) >= 2:
+            yield verts
+
+    def _interpolate_segment_by_m(self, p0, p1, target_m, eps):
+        m0, m1 = p0.m(), p1.m()
+        if m0 is None or m1 is None:
+            return None
+        if not ((m0 - eps <= target_m <= m1 + eps) or (m1 - eps <= target_m <= m0 + eps)):
+            return None
+        if abs(m1 - m0) < eps:
+            return QgsPointXY(p0.x(), p0.y()), 0.0
+
+        t = (target_m - m0) / (m1 - m0)
+        t = max(0.0, min(1.0, t))
+        x = p0.x() + t * (p1.x() - p0.x())
+        y = p0.y() + t * (p1.y() - p0.y())
+        return QgsPointXY(x, y), t
+
+    def _close_messagebar(self):
+        if self.current_msg:
+            try:
+                self.iface.messageBar().popWidget(self.current_msg)
+            except Exception:
+                try:
+                    self.current_msg.close()
+                except Exception:
+                    pass
+            finally:
+                self.current_msg = None
+
+    def _push_info_message(self, msg):
+        self._close_messagebar()
+        self.current_msg = self.iface.messageBar().pushWidget(msg, level=Qgis.Info)
+
+    def _show_nearest_available_message(self, via, target_m, nearest_m, reason, via_value=None):
+        searched = format_value_for_mode(
+            target_m,
+            self.m_units,
+            self.output_mode,
+            for_button=False,
+        )
+        nearest = format_value_for_mode(
+            nearest_m,
+            self.m_units,
+            self.output_mode,
+            for_button=True,
+        )
+        message_text = f"{searched} {reason}. Más próximo: {nearest}"
+
+        msg = self.iface.messageBar().createMessage(output_terms(self.output_mode)["tool_locate"], message_text)
+        btn_nearest = QPushButton(f"Ajustar: {nearest}")
+        nearest_pk_km = raw_m_to_pk_km(nearest_m, self.m_units)
+        btn_nearest.clicked.connect(lambda: self.locate(via, nearest_pk_km, via_value))
+        msg.layout().addWidget(btn_nearest)
+        self._push_info_message(msg)
 
     # ---------------------------------------------------
     # Lógica de localización
     # ---------------------------------------------------
-    def locate(self, via, pk_km):
+    def locate(self, via, pk_km, via_value=None):
         field = self.id_field or EXPECTED_FIELD
 
-        # 0) Preparar objetivo según unidades del M
-        # Si m_units == "m": M en metros → target_m = pk_km * 1000
-        # Si m_units == "km": M en kilómetros → target_m = pk_km
-        if (self.m_units or "m") == "m":
-            target_m = pk_km * 1000.0
-        else:
-            target_m = pk_km
-
+        target_m = pk_km_to_raw_m(pk_km, self.m_units)
         EPS = 1e-6
 
         # 1) Reunir TODAS las features de la vía
         if not self.layer:
-            self.iface.messageBar().pushWarning("Localizar PK", "No hay capa seleccionada.")
+            self.iface.messageBar().pushWarning(output_terms(self.output_mode)["tool_locate"], "No hay capa seleccionada.")
             return
 
-        feats = [f for f in self.layer.getFeatures() if f[field] == via]
+        via_value = via if via_value is None else via_value
+        feats = features_by_field_value(self.layer, field, via_value)
         if not feats:
-            self.iface.messageBar().pushInfo("Localizar PK", f"No se encontró vía '{via}'.")
+            terms = output_terms(self.output_mode)
+            self.iface.messageBar().pushInfo(
+                terms["tool_locate"],
+                f"No se encontró {terms['identifier_lower']} '{via}'."
+            )
             return
 
-        # 2) Auxiliar: interpolar por M (multipartes + M invertida)
-        def _interpolate_point_by_m(geom, target_val):
-            verts = list(geom.vertices())
-            if len(verts) < 2:
-                return None
-            for i in range(len(verts) - 1):
-                p0, p1 = verts[i], verts[i + 1]
-                m0, m1 = p0.m(), p1.m()
-                if m0 is None or m1 is None:
-                    continue
-                # ¿target entre m0 y m1 sin asumir orden?
-                if (m0 - EPS <= target_val <= m1 + EPS) or (m1 - EPS <= target_val <= m0 + EPS):
-                    if abs(m1 - m0) < EPS:
-                        return QgsPointXY(p0.x(), p0.y())
-                    t = (target_val - m0) / (m1 - m0)
-                    x = p0.x() + t * (p1.x() - p0.x())
-                    y = p0.y() + t * (p1.y() - p0.y())
-                    return QgsPointXY(x, y)
-            return None
-
-        # 3) Buscar el tramo que contiene el target
-        global_min = None
-        global_max = None
-        map_pt = None
+        # 2) Buscar todos los segmentos reales que contienen el target.
+        coverage_intervals = []
+        candidates = []
 
         for f in feats:
             geom = f.geometry()
-            m_vals = [pt.m() for pt in geom.vertices() if pt.m() is not None]
-            if not m_vals:
+            if not geom:
                 continue
-            fmin, fmax = min(m_vals), max(m_vals)
-            global_min = fmin if global_min is None else min(global_min, fmin)
-            global_max = fmax if global_max is None else max(global_max, fmax)
 
-            if fmin - EPS <= target_m <= fmax + EPS:
-                pt = _interpolate_point_by_m(geom, target_m)
-                if pt is not None:
-                    map_pt = pt
-                    break  # encontrado
+            for part_idx, verts in enumerate(self._geometry_parts_vertices(geom)):
+                for seg_idx in range(len(verts) - 1):
+                    p0, p1 = verts[seg_idx], verts[seg_idx + 1]
+                    m0, m1 = p0.m(), p1.m()
+                    if m0 is not None and m1 is not None:
+                        coverage_intervals.append((m0, m1))
+
+                    result = self._interpolate_segment_by_m(p0, p1, target_m, EPS)
+                    if result is None:
+                        continue
+
+                    pt, t = result
+                    m_span = abs(p1.m() - p0.m())
+                    endpoint_penalty = 1 if t <= EPS or t >= 1.0 - EPS else 0
+                    candidates.append((
+                        endpoint_penalty,
+                        m_span,
+                        f.id(),
+                        part_idx,
+                        seg_idx,
+                        pt,
+                    ))
+
+        map_pt = None
+        if candidates:
+            candidates.sort(key=lambda item: item[:5])
+            map_pt = candidates[0][5]
 
         if map_pt is None:
-            if global_min is not None and global_max is not None:
-                # Convertimos el rango a km para que sea consistente con pk_km
-                if (self.m_units or "m") == "m":
-                    min_km = global_min / 1000.0
-                    max_km = global_max / 1000.0
-                else:
-                    min_km = global_min
-                    max_km = global_max
+            tolerance = interval_tolerance_to_raw(10.0, self.m_units)
+            status = coverage_status(target_m, coverage_intervals, tolerance)
+            nearest_m = status.get("nearest_m")
+            if nearest_m is None:
+                nearest_m = nearest_interval_endpoint(target_m, coverage_intervals)
 
-                self.iface.messageBar().pushInfo(
-                    "Localizar PK",
-                    f"PK {formato_pk(pk_km)} fuera de rango de la vía "
-                    f"(rango total ~ {min_km:.3f}–{max_km:.3f} km)."
-                )
+            if nearest_m is not None and status.get("status") in ("gap", "below", "above", "covered"):
+                reason = "sin cobertura" if status.get("status") in ("gap", "covered") else "fuera de rango"
+                self._show_nearest_available_message(via, target_m, nearest_m, reason, via_value)
             else:
+                terms = output_terms(self.output_mode)
                 self.iface.messageBar().pushInfo(
-                    "Localizar PK",
-                    f"No hay medidas M válidas en la vía '{via}'."
+                    terms["tool_locate"],
+                    f"No hay medidas M válidas en el {terms['identifier_lower']} '{via}'."
                 )
             return
 
@@ -307,11 +402,13 @@ class LocalizarPK:
             f"&viewpoint={lat:.6f},{lon:.6f}&heading=0&pitch=10&fov=250"
         )
 
+        value_text = format_value_for_mode(target_m, self.m_units, self.output_mode)
+        terms = output_terms(self.output_mode)
         message_text = (
-            f"Vía: {via} – PK {formato_pk(pk_km)} ({pk_km:.3f} km) | "
+            f"{terms['identifier']}: {via} – {value_text} | "
             f"<a href='{url_sv}'>Ver en Street View ({lat:.6f},{lon:.6f})</a>"
         )
-        msg = self.iface.messageBar().createMessage("Localizar PK", message_text)
+        msg = self.iface.messageBar().createMessage(terms["tool_locate"], message_text)
 
         btn_zoom = QPushButton("Zoom")
         btn_zoom.clicked.connect(lambda: self._zoom_al_punto(map_pt))
@@ -334,10 +431,10 @@ class LocalizarPK:
         btn_clear.clicked.connect(self._limpiar_marcadores)
         msg.layout().addWidget(btn_clear)
 
-        self.iface.messageBar().pushWidget(msg, level=Qgis.Info)
+        self._push_info_message(msg)
 
         # 6) Historial
-        self.history.insert(0, (via, pk_km, map_pt))
+        self.history.insert(0, (via, pk_km, target_m, map_pt))
         self._update_history_menu()
 
     # ---------------------------------------------------
@@ -378,6 +475,12 @@ class LocalizarPK:
     # ---------------------------------------------------
     # Historial y exportación
     # ---------------------------------------------------
+    def _history_parts(self, item):
+        if len(item) == 4:
+            return item
+        via, pk_km, map_pt = item
+        return via, pk_km, pk_km_to_raw_m(pk_km, self.m_units), map_pt
+
     def _update_history_menu(self):
         self.history_menu.clear()
 
@@ -395,15 +498,16 @@ class LocalizarPK:
         self.history_menu.addSeparator()
 
         # 4) Historial (más recientes primero)
-        for via, pk_km, map_pt in self.history:
-            texto = f"{via} – {formato_pk(pk_km)}"
+        for item in self.history:
+            via, pk_km, raw_m, map_pt = self._history_parts(item)
+            texto = f"{via} – {format_value_for_mode(raw_m, self.m_units, self.output_mode)}"
             act = QAction(texto, self.iface.mainWindow())
             act.triggered.connect(
-                lambda checked, v=via, p=pk_km, mp=map_pt: self._from_history(v, p, mp)
+                lambda checked, v=via, p=pk_km, r=raw_m, mp=map_pt: self._from_history(v, p, r, mp)
             )
             self.history_menu.addAction(act)
 
-    def _from_history(self, via, pk_km, map_pt):
+    def _from_history(self, via, pk_km, raw_m, map_pt):
         # Redibuja el marcador y muestra el mensaje
         self._limpiar_marcadores()
         self._add_marker(map_pt, QColor(0, 0, 255))
@@ -420,11 +524,13 @@ class LocalizarPK:
             f"&viewpoint={lat:.6f},{lon:.6f}&heading=0&pitch=10&fov=250"
         )
 
+        value_text = format_value_for_mode(raw_m, self.m_units, self.output_mode)
+        terms = output_terms(self.output_mode)
         message_text = (
-            f"Vía: {via} – PK {formato_pk(pk_km)} ({pk_km:.3f} km) | "
+            f"{terms['identifier']}: {via} – {value_text} | "
             f"<a href='{url_sv}'>Ver en Street View ({lat:.6f},{lon:.6f})</a>"
         )
-        msg = self.iface.messageBar().createMessage("Localizar PK", message_text)
+        msg = self.iface.messageBar().createMessage(terms["tool_locate"], message_text)
 
         btn_zoom = QPushButton("Zoom")
         btn_zoom.clicked.connect(lambda: self._zoom_al_punto(map_pt))
@@ -447,7 +553,7 @@ class LocalizarPK:
         btn_clear.clicked.connect(self._limpiar_marcadores)
         msg.layout().addWidget(btn_clear)
 
-        self.iface.messageBar().pushWidget(msg, level=Qgis.Info)
+        self._push_info_message(msg)
 
     def _exportar_historial(self):
         if not self.history:
@@ -465,8 +571,10 @@ class LocalizarPK:
         list_widget.setSelectionMode(QListWidget.MultiSelection)
 
         # Desmarcados por defecto, más recientes primero (self.history ya lo está)
-        for i, (via, pk_km, _) in enumerate(self.history):
-            texto = f"{via} – {formato_pk(pk_km)} ({pk_km:.3f} km)"
+        for i, item in enumerate(self.history):
+            via, pk_km, raw_m, _ = self._history_parts(item)
+            value_text = format_value_for_mode(raw_m, self.m_units, self.output_mode)
+            texto = f"{via} – {value_text}"
             item = QListWidgetItem(texto)
             item.setSelected(False)
             item.setData(1000, i)  # índice en self.history
@@ -503,12 +611,16 @@ class LocalizarPK:
             return
 
         # Crear capa temporal (EPSG:4326)
-        vl = QgsVectorLayer("Point?crs=EPSG:4326", "Localización de PKs", "memory")
+        terms = output_terms(self.output_mode)
+        vl = QgsVectorLayer(f"Point?crs=EPSG:4326", terms["located_layer"], "memory")
         pr = vl.dataProvider()
-        pr.addAttributes([
-            QgsField("VIA", QVariant.String),
-            QgsField("PK", QVariant.String)
-        ])
+        fields = [QgsField(terms["id_field"], QVariant.String)]
+        if self.output_mode == "raw_m":
+            fields.append(QgsField(terms["value_field"], QVariant.Double))
+        else:
+            fields.append(QgsField(terms["value_field"], QVariant.String))
+            fields.append(QgsField(terms["pk_number_field"], QVariant.Double, "double", 20, 3))
+        pr.addAttributes(fields)
         vl.updateFields()
 
         # Transformación a WGS84 desde CRS del mapa
@@ -519,11 +631,18 @@ class LocalizarPK:
         )
 
         for idx in seleccionados:
-            via, pk_km, map_pt = self.history[idx]
+            via, pk_km, raw_m, map_pt = self._history_parts(self.history[idx])
             pt = xf.transform(map_pt)
             feat = QgsFeature()
             feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(pt)))
-            feat.setAttributes([via, formato_pk(pk_km)])
+            if self.output_mode == "raw_m":
+                feat.setAttributes([via, raw_m_export_value(raw_m)])
+            else:
+                feat.setAttributes([
+                    via,
+                    format_pk_export_text(raw_m, self.m_units),
+                    pk_numeric_km(raw_m, self.m_units),
+                ])
             pr.addFeature(feat)
 
         vl.updateExtents()

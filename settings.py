@@ -12,17 +12,24 @@ Módulo de configuración para PK Tools.
 
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QComboBox, QPushButton, QDialogButtonBox, QTextEdit
+    QComboBox, QDialogButtonBox, QTextEdit, QSpinBox
 )
 from qgis.PyQt.QtCore import Qt
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsWkbTypes,
-    QgsSettings, QgsGeometry, QgsPointXY
+    QgsSettings
+)
+from .utils import (
+    format_output_value,
+    format_raw_m,
+    normalize_output_mode,
+    raw_m_to_pk_km,
 )
 
 
 # Clave base en QgsSettings (queda en QGIS.ini bajo plugins/pk_tools/*)
 SETTINGS_GROUP = "plugins/pk_tools"
+DEFAULT_CLICK_TOLERANCE_PX = 25
 
 
 class PKToolsSettings:
@@ -30,8 +37,11 @@ class PKToolsSettings:
     Pequeño wrapper para manejar la configuración del plugin.
     """
     KEY_LAYER_NAME = SETTINGS_GROUP + "/layer_name"
+    KEY_LAYER_ID = SETTINGS_GROUP + "/layer_id"
     KEY_ID_FIELD = SETTINGS_GROUP + "/id_field"
     KEY_M_UNITS  = SETTINGS_GROUP + "/m_units"   # "m" o "km"
+    KEY_OUTPUT_MODE = SETTINGS_GROUP + "/output_mode"  # "pk" o "raw_m"
+    KEY_CLICK_TOLERANCE_PX = SETTINGS_GROUP + "/click_tolerance_px"
 
     def __init__(self):
         self._qsettings = QgsSettings()
@@ -42,28 +52,76 @@ class PKToolsSettings:
         """
         return self._qsettings.contains(self.KEY_LAYER_NAME)
 
+    def has_valid_config(self) -> bool:
+        """
+        Valida solo los datos imprescindibles guardados.
+
+        No comprueba si la capa existe en el proyecto actual para evitar abrir
+        la configuracion de forma invasiva al cambiar de proyecto.
+        """
+        layer_name = self._qsettings.value(self.KEY_LAYER_NAME, "", type=str).strip()
+        layer_id = self._qsettings.value(self.KEY_LAYER_ID, "", type=str).strip()
+        id_field = self._qsettings.value(self.KEY_ID_FIELD, "", type=str).strip()
+        m_units = self._qsettings.value(self.KEY_M_UNITS, "m", type=str)
+        output_mode = self._qsettings.value(self.KEY_OUTPUT_MODE, "pk", type=str)
+        return (
+            bool(layer_id or layer_name)
+            and bool(id_field)
+            and m_units in ("m", "km")
+            and normalize_output_mode(output_mode) == output_mode
+        )
+
     def load(self):
         """
         Devuelve un dict con la configuración actual (o valores por defecto).
         """
         layer_name = self._qsettings.value(self.KEY_LAYER_NAME, "", type=str)
+        layer_id = self._qsettings.value(self.KEY_LAYER_ID, "", type=str)
         id_field   = self._qsettings.value(self.KEY_ID_FIELD, "ID_ROAD", type=str)
         m_units    = self._qsettings.value(self.KEY_M_UNITS, "m", type=str)
         if m_units not in ("m", "km"):
             m_units = "m"
+        output_mode = normalize_output_mode(
+            self._qsettings.value(self.KEY_OUTPUT_MODE, "pk", type=str)
+        )
+        try:
+            click_tolerance_px = int(
+                self._qsettings.value(
+                    self.KEY_CLICK_TOLERANCE_PX,
+                    DEFAULT_CLICK_TOLERANCE_PX,
+                    type=int,
+                )
+            )
+        except Exception:
+            click_tolerance_px = DEFAULT_CLICK_TOLERANCE_PX
+        if click_tolerance_px <= 0:
+            click_tolerance_px = DEFAULT_CLICK_TOLERANCE_PX
         return {
             "layer_name": layer_name,
+            "layer_id": layer_id,
             "id_field": id_field,
             "m_units": m_units,
+            "output_mode": output_mode,
+            "click_tolerance_px": click_tolerance_px,
         }
 
-    def save(self, layer_name: str, id_field: str, m_units: str):
+    def save(self, layer_name: str, id_field: str, m_units: str, output_mode: str = "pk",
+             layer_id: str = "", click_tolerance_px: int = DEFAULT_CLICK_TOLERANCE_PX):
         """
         Guarda los valores indicados.
         """
         self._qsettings.setValue(self.KEY_LAYER_NAME, layer_name)
+        self._qsettings.setValue(self.KEY_LAYER_ID, layer_id)
         self._qsettings.setValue(self.KEY_ID_FIELD, id_field)
         self._qsettings.setValue(self.KEY_M_UNITS, m_units)
+        self._qsettings.setValue(self.KEY_OUTPUT_MODE, normalize_output_mode(output_mode))
+        try:
+            click_tolerance_px = int(click_tolerance_px)
+        except Exception:
+            click_tolerance_px = DEFAULT_CLICK_TOLERANCE_PX
+        if click_tolerance_px <= 0:
+            click_tolerance_px = DEFAULT_CLICK_TOLERANCE_PX
+        self._qsettings.setValue(self.KEY_CLICK_TOLERANCE_PX, click_tolerance_px)
 
 
 class PKToolsSettingsDialog(QDialog):
@@ -98,32 +156,54 @@ class PKToolsSettingsDialog(QDialog):
 
         # Capa
         row_layer = QHBoxLayout()
-        row_layer.addWidget(QLabel("Capa de vías calibradas:"))
+        row_layer.addWidget(QLabel("Capa lineal con geometría M:"))
         self.cbo_layer = QComboBox()
         for lyr in self._layers:
-            self.cbo_layer.addItem(lyr.name())
+            self.cbo_layer.addItem(lyr.name(), lyr.id())
         self.cbo_layer.currentIndexChanged.connect(self._on_layer_changed)
         row_layer.addWidget(self.cbo_layer)
         layout.addLayout(row_layer)
 
         # Campo identificador
         row_field = QHBoxLayout()
-        row_field.addWidget(QLabel("Campo identificador de la vía:"))
+        row_field.addWidget(QLabel("Campo identificador / vía:"))
         self.cbo_field = QComboBox()
+        self.cbo_field.currentIndexChanged.connect(self._refresh_preview)
         row_field.addWidget(self.cbo_field)
         layout.addLayout(row_field)
 
         # Unidades del M
         row_units = QHBoxLayout()
-        row_units.addWidget(QLabel("Unidades del campo M: (por defecto: metros)"))
+        row_units.addWidget(QLabel("Unidades de la medida M:"))
         self.cbo_units = QComboBox()
         self.cbo_units.addItem("Metros", "m")
         self.cbo_units.addItem("Kilómetros", "km")
+        self.cbo_units.currentIndexChanged.connect(self._refresh_preview)
         row_units.addWidget(self.cbo_units)
         layout.addLayout(row_units)
 
+        # Formato de salida
+        row_output = QHBoxLayout()
+        row_output.addWidget(QLabel("Salida mostrada:"))
+        self.cbo_output = QComboBox()
+        self.cbo_output.addItem("Formato PK", "pk")
+        self.cbo_output.addItem("Valor M bruto", "raw_m")
+        self.cbo_output.currentIndexChanged.connect(self._refresh_preview)
+        row_output.addWidget(self.cbo_output)
+        layout.addLayout(row_output)
+
+        # Tolerancia visual para avisar si el segundo clic cae lejos de la geometria
+        row_tolerance = QHBoxLayout()
+        row_tolerance.addWidget(QLabel("Tolerancia clic-vía:"))
+        self.spin_click_tolerance = QSpinBox()
+        self.spin_click_tolerance.setRange(1, 500)
+        self.spin_click_tolerance.setSuffix(" px")
+        self.spin_click_tolerance.setValue(DEFAULT_CLICK_TOLERANCE_PX)
+        row_tolerance.addWidget(self.spin_click_tolerance)
+        layout.addLayout(row_tolerance)
+
         # Preview M
-        layout.addWidget(QLabel("Vista previa de algunos valores M:"))
+        layout.addWidget(QLabel("Vista previa de salida según la configuración:"))
         self.txt_preview = QTextEdit()
         self.txt_preview.setReadOnly(True)
         self.txt_preview.setMinimumHeight(120)
@@ -148,8 +228,15 @@ class PKToolsSettingsDialog(QDialog):
         """
         cfg = self.current_cfg
 
-        # Seleccionar capa por nombre
-        if self._layers and cfg["layer_name"]:
+        # Seleccionar capa por id, con fallback por nombre para configuraciones antiguas
+        selected = False
+        if self._layers and cfg.get("layer_id"):
+            for i, lyr in enumerate(self._layers):
+                if lyr.id() == cfg["layer_id"]:
+                    self.cbo_layer.setCurrentIndex(i)
+                    selected = True
+                    break
+        if self._layers and not selected and cfg["layer_name"]:
             for i, lyr in enumerate(self._layers):
                 if lyr.name() == cfg["layer_name"]:
                     self.cbo_layer.setCurrentIndex(i)
@@ -169,6 +256,17 @@ class PKToolsSettingsDialog(QDialog):
         idx_units = self.cbo_units.findData(units)
         if idx_units >= 0:
             self.cbo_units.setCurrentIndex(idx_units)
+
+        output_mode = cfg.get("output_mode", "pk")
+        idx_output = self.cbo_output.findData(output_mode)
+        if idx_output >= 0:
+            self.cbo_output.setCurrentIndex(idx_output)
+
+        try:
+            click_tolerance_px = int(cfg.get("click_tolerance_px", DEFAULT_CLICK_TOLERANCE_PX))
+        except Exception:
+            click_tolerance_px = DEFAULT_CLICK_TOLERANCE_PX
+        self.spin_click_tolerance.setValue(max(1, click_tolerance_px))
 
     # ---------------------------
     # Búsqueda de capas y preview
@@ -191,8 +289,10 @@ class PKToolsSettingsDialog(QDialog):
           - Rellena combo de campos
           - Actualiza preview de M
         """
+        self.cbo_field.blockSignals(True)
         self.cbo_field.clear()
         if idx < 0 or idx >= len(self._layers):
+            self.cbo_field.blockSignals(False)
             self.txt_preview.clear()
             return
 
@@ -206,30 +306,55 @@ class PKToolsSettingsDialog(QDialog):
                 id_road_index = i
         if id_road_index >= 0:
             self.cbo_field.setCurrentIndex(id_road_index)
+        self.cbo_field.blockSignals(False)
 
         # Preview de M
         self._update_preview(layer)
 
+    def _refresh_preview(self, *args):
+        if not hasattr(self, "txt_preview"):
+            return
+        idx = self.cbo_layer.currentIndex()
+        if idx < 0 or idx >= len(self._layers):
+            self.txt_preview.clear()
+            return
+        self._update_preview(self._layers[idx])
+
     def _update_preview(self, layer: QgsVectorLayer, max_features: int = 5):
         """
-        Muestra algunos valores M de la capa para ayudar al usuario a
-        deducir si están en metros o en kilómetros.
+        Muestra valores M originales y su salida PK con la configuración actual.
         """
         lines = []
         count = 0
+        units = self.selected_m_units()
+        output_mode = self.selected_output_mode()
+        id_field = self.selected_id_field()
+        id_field_index = layer.fields().indexOf(id_field) if id_field else -1
+
         for feat in layer.getFeatures():
             geom = feat.geometry()
             if not geom:
                 continue
-            m_vals = []
+            samples = []
             for pt in geom.vertices():
                 m = pt.m()
                 if m is not None:
-                    m_vals.append(m)
-                if len(m_vals) >= 4:  # unos pocos valores por feature
+                    pk_km = raw_m_to_pk_km(m, units)
+                    output = format_output_value(
+                        raw_m=m,
+                        pk_km=pk_km,
+                        m_units=units,
+                        output_mode=output_mode,
+                    )
+                    samples.append(f"M {format_raw_m(m, units)} -> {output}")
+                if len(samples) >= 3:  # unos pocos valores por feature
                     break
-            if m_vals:
-                lines.append(f"Feature {feat.id()}: M ~ {', '.join(f'{v:.3f}' for v in m_vals)}")
+            if samples:
+                if id_field_index >= 0:
+                    label = f"Feature {feat.id()} ({id_field}={feat[id_field]})"
+                else:
+                    label = f"Feature {feat.id()}"
+                lines.append(f"{label}: " + " | ".join(samples))
                 count += 1
             if count >= max_features:
                 break
@@ -248,12 +373,24 @@ class PKToolsSettingsDialog(QDialog):
             return ""
         return self._layers[idx].name()
 
+    def selected_layer_id(self) -> str:
+        idx = self.cbo_layer.currentIndex()
+        if idx < 0 or idx >= len(self._layers):
+            return ""
+        return self._layers[idx].id()
+
     def selected_id_field(self) -> str:
         return self.cbo_field.currentText().strip()
 
     def selected_m_units(self) -> str:
         data = self.cbo_units.currentData()
         return data if data in ("m", "km") else "m"
+
+    def selected_output_mode(self) -> str:
+        return normalize_output_mode(self.cbo_output.currentData())
+
+    def selected_click_tolerance_px(self) -> int:
+        return int(self.spin_click_tolerance.value())
 
     # ---------------------------
     # Aceptar diálogo
@@ -263,10 +400,13 @@ class PKToolsSettingsDialog(QDialog):
         Al aceptar, guardamos la configuración.
         """
         layer_name = self.selected_layer_name()
+        layer_id = self.selected_layer_id()
         id_field   = self.selected_id_field() or "ID_ROAD"
         m_units    = self.selected_m_units()
+        output_mode = self.selected_output_mode()
+        click_tolerance_px = self.selected_click_tolerance_px()
 
-        self.settings_mgr.save(layer_name, id_field, m_units)
+        self.settings_mgr.save(layer_name, id_field, m_units, output_mode, layer_id, click_tolerance_px)
         super().accept()
 
 
@@ -276,7 +416,18 @@ def show_settings_dialog(iface):
     """
     parent = iface.mainWindow() if iface is not None else None
     dlg = PKToolsSettingsDialog(parent)
-    dlg.exec_()
+    return dlg.exec_() == QDialog.Accepted
+
+
+def ensure_settings_configured(iface) -> bool:
+    """
+    Abre la configuracion solo cuando una herramienta se usa sin ajustes validos.
+    """
+    if PKToolsSettings().has_valid_config():
+        return True
+    if not show_settings_dialog(iface):
+        return False
+    return PKToolsSettings().has_valid_config()
 
 
 def read_current_settings():
@@ -287,5 +438,6 @@ def read_current_settings():
         cfg = read_current_settings()
         id_field = cfg["id_field"]
         m_units  = cfg["m_units"]  # "m" / "km"
+        output_mode = cfg["output_mode"]  # "pk" / "raw_m"
     """
     return PKToolsSettings().load()
