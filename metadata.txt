@@ -2,7 +2,7 @@
 name=PK Tools
 qgisMinimumVersion=3.22
 description=Herramientas para identificar, localizar y medir distancias entre PKs en capas lineales con geometría M.
-version=1.0
+version=1.1.0
 author=Javi H Piris
 email=pirishj@gmail.com
 about=PK Tools unifica tres utilidades en un único complemento:
