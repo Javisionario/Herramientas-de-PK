@@ -1,16 +1,11 @@
 [general]
 name=PK Tools
 qgisMinimumVersion=3.22
-description=Herramientas para identificar, localizar y medir distancias entre PKs en capas lineales con geometría M.
+description=Tools to identify, locate and measure positions on M-enabled line layers using PK format or raw M values.
 version=1.1.0
 author=Javi H Piris
 email=pirishj@gmail.com
-about=PK Tools unifica tres utilidades en un único complemento:
-  • Identificar PK: Clic en el mapa para obtener la vía y su el PK, con enlace a Street View y opciones de exportar los puntos identificados a una capa de puntos mediante click derecho.
-  • Localizar PK: Introduce carretera y PK para ubicar el punto exacto en el mapa, con posibilidad de recuperar el historial y exportar los puntos a una capa temporal y menú desplegable.
-  • Distancia PK: mide la distancia entre dos PKs sobre la misma vía, mostrando tanto la distancia por PK como la distancia lineal (en ocasiones la calibración de la capa no coincide con la diferencia entre PKs.
-  
-  Ideal para proyectos de carreteras o análisis de movilidad.
+about=PK Tools provides QGIS tools to identify, locate and measure positions along M-enabled line layers. It is designed for road workflows based on kilometre posts (PK), but it also supports generic M-enabled layers and raw M values. The plugin includes tools to click and identify positions, locate a specific PK or M value, export temporary points and measure distances conservatively along the selected geometry. It does not create or fix M values; it works with existing M-enabled geometries.
 category=Vector
 homepage=https://github.com/Javisionario
 tracker=https://github.com/Javisionario/PK_tools/issues
