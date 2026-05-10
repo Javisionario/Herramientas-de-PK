@@ -6,64 +6,122 @@
 
 ---
 
-## 🔧 ¿Qué hace PK Tools?
+## 🔧 Qué hace PK Tools
 
-PK Tools está pensado para capas de carreteras **lineales con geometría M** (calibración).  
-Trabaja siempre sobre **una capa de trabajo configurable**, y a partir de ella ofrece tres herramientas:
+PK Tools está pensado para trabajar con **capas lineales con geometría M**.
+Puede usarse en un contexto de carreteras y puntos kilométricos, pero también en análisis genéricos donde la geometría almacena una medida M.
+
+El complemento trabaja siempre sobre **una capa de trabajo configurable** y ofrece tres herramientas:
+
+- **Identificar**: obtiene la medida M o PK en un punto clicado sobre la capa.
+- **Localizar**: localiza una medida M o PK concreta sobre una vía/identificador.
+- **Distancia**: mide entre dos posiciones sobre la misma geometría o parte inicial.
+
+PK Tools **no genera ni corrige valores M**. Trabaja sobre geometrías que ya contienen valores M válidos.
 
 ---
 
-## 🧭 Identificar PK
+## 🧭 Identificar
 
-Permite identificar la vía y el punto kilométrico haciendo clic sobre una capa de carreteras (líneas calibradas con valores M).
+Permite identificar la vía/identificador y la posición medida haciendo clic sobre una línea calibrada con valores M.
 
-- Muestra:
-  - El nombre de la vía.
-  - El PK interpolado (en km y en formato `km+000`).
-  - Un enlace a Street View.
-  - Botones para copiar vía, PK y coordenadas al portapapeles.
-- Mantiene un **historial interno** de puntos identificados que se puede exportar a una capa temporal de puntos.
-- El punto identificado queda marcado hasta que se selecciona otro o se apaga la herramienta.
+- En modo **Formato PK**, muestra la vía y el PK, por ejemplo `PK 150+500`.
+- En modo **Valor M bruto**, muestra el identificador y la medida, por ejemplo `M 150500`.
+- Muestra coordenadas y enlace a Street View cuando es posible.
+- Incluye botones para copiar el identificador, el resultado y las coordenadas.
+- Mantiene un historial interno de puntos identificados.
+- Permite exportar puntos identificados a una capa temporal.
+- En geometrías multipart, usa la parte más cercana al clic para evitar unir partes distintas.
+
+Exportación:
+
+- Modo **Formato PK**: `VIA`, `PK`, `PK_NUM`.
+- Modo **Valor M bruto**: `IDENTIFICADOR`, `M_RAW`.
 
 ![](PICTURES/Identificar.png)
 
 ---
 
-## 📍 Localizar PK
+## 📍 Localizar
 
 Abre una ventana donde el usuario puede introducir:
 
-- La carretera (mediante el campo identificador configurado).
-- Un PK (kilómetros + metros).
+- Una vía o identificador.
+- Un PK o una medida M, según el modo de salida configurado.
 
 El complemento:
 
-- Ubica el punto exacto en el mapa sobre la capa calibrada.
+- Usa autocompletado para el campo vía/identificador.
+- El autocompletado es insensible a mayúsculas/minúsculas.
+- Conserva los valores originales: `MA-10` y `Ma-10` se mantienen como valores distintos.
+- No normaliza el valor real usado para localizar.
 - Dibuja un marcador en el mapa.
-- Muestra un enlace a Street View y un botón para centrar el mapa.
-- Mantiene un **historial** accesible desde el menú desplegable del botón.
+- Muestra enlace a Street View, botón de zoom y copia de coordenadas.
+- Mantiene un historial accesible desde el menú desplegable del botón.
 - Permite exportar puntos seleccionados del historial a una capa temporal.
+
+En modo **Formato PK**, la entrada acepta formatos como:
+
+- `150`
+- `150.500`
+- `150,500`
+- `150+500`
+- `0+010`
+
+En modo **Valor M bruto**, la entrada acepta la medida M directa, por ejemplo:
+
+- `150500`
+
+Si el valor buscado cae en un hueco interno sin cobertura, o queda fuera del rango disponible, PK Tools muestra un aviso breve y ofrece un botón **Ajustar** al valor disponible más próximo. No ajusta automáticamente sin acción del usuario.
+
+Exportación:
+
+- Modo **Formato PK**: `VIA`, `PK`, `PK_NUM`.
+- Modo **Valor M bruto**: `IDENTIFICADOR`, `M_RAW`.
 
 ![](PICTURES/Localizar.png)
 
 ---
 
-## 📏 Distancia PK
+## 📏 Distancia
 
-Permite medir la **distancia entre dos PKs sobre la misma vía**, mostrando:
+Permite medir entre dos posiciones sobre la misma geometría o parte seleccionada con el primer clic.
 
-- La diferencia de PK (basada en los valores M de la capa).
-- La distancia lineal real calculada sobre la geometría (en km).
+Muestra:
 
-Esto es útil porque puede haber discrepancias entre la calibración (M) y la geometría real.
+- La diferencia entre las medidas M o PK.
+- La distancia lineal sobre la geometría.
 
-Los puntos medidos quedan señalados con marcadores hasta que se realiza una nueva medición o se apaga la herramienta.
+Características importantes:
+
+- Solo acepta clic izquierdo.
+- El primer clic selecciona la feature y, si es multipart, la parte concreta más cercana.
+- El segundo clic se proyecta sobre esa misma parte inicial.
+- No hace routing.
+- No reconstruye rutas.
+- No une features partidas.
+- No une partes multipart como si fueran continuas.
+- Usa la tolerancia clic-vía para avisar si el segundo clic está lejos de la geometría inicial.
+- Usa `QgsDistanceArea` cuando procede para medir la distancia lineal de forma adecuada al CRS.
+- La lógica M se mantiene siempre sobre los valores M originales de la geometría.
+
+Esto es útil porque puede haber diferencias entre la calibración M y la longitud geométrica real.
 
 ![](PICTURES/Distancia.png)
 
 ---
 
-Estas herramientas son ideales para proyectos de carreteras o análisis de movilidad, agilizando en gran medida el flujo de trabajo.
+## Huecos de cobertura
+
+PK Tools distingue entre el rango global de una vía/identificador y los intervalos reales de cobertura M.
+
+Si una vía llega, por ejemplo, hasta `PK 285+000` y continúa desde `PK 290+500`, una búsqueda de `PK 290+000` se considera un hueco interno. En ese caso:
+
+- El plugin informa de que el valor no tiene cobertura.
+- Calcula el valor disponible más próximo.
+- Ofrece un botón para ajustar manualmente.
+- No inventa posiciones dentro de huecos grandes.
+- No salta automáticamente sin acción del usuario.
 
 ---
 
@@ -72,113 +130,169 @@ Estas herramientas son ideales para proyectos de carreteras o análisis de movil
 ### 1. Desde el repositorio oficial de QGIS (recomendado)
 
 1. Abre QGIS.
-2. Ve a `Complementos → Administrar e instalar complementos`.
-3. En la pestaña **Todos**, busca **“PK Tools”**.
+2. Ve a `Complementos -> Administrar e instalar complementos`.
+3. En la pestaña **Todos**, busca **PK Tools**.
 4. Selecciónalo y pulsa **Instalar complemento**.
-5. Actívalo (si no lo está) desde la pestaña **Instalados**.
+5. Actívalo desde la pestaña **Instalados** si no se activa automáticamente.
 
-Al activarlo, aparecerá una **barra de herramientas propia** llamada `PK Tools`, con tres botones (Identificar, Localizar, Distancia) y un pequeño botón de **opciones** al final.
+Al activarlo, aparecerá una barra de herramientas propia llamada `PK Tools`, con tres botones: Identificar, Localizar y Distancia. Al final de la barra hay un botón de opciones para abrir la configuración.
 
 ### 2. Desde GitHub (ZIP)
 
-1. En GitHub, descarga el repositorio: `Code → Download ZIP`.
-2. En QGIS, ve a  
-   `Complementos → Administrar e instalar complementos → Instalar desde ZIP`.
+1. En GitHub, descarga el repositorio: `Code -> Download ZIP`.
+2. En QGIS, ve a `Complementos -> Administrar e instalar complementos -> Instalar desde ZIP`.
 3. Selecciona el ZIP descargado y pulsa **Instalar complemento**.
 4. Actívalo en la pestaña **Instalados** si no se activa automáticamente.
 
-### 3. Instalación manual (carpeta)
+### 3. Instalación manual
 
-1. Descomprime y copia la carpeta `pk_tools` en la carpeta de complementos de tu perfil de QGIS, por ejemplo:  
-   - **Windows**:  
-     `C:\Users\USUARIO\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\pk_tools`  
-   - **Linux/Mac**:  
-     `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/pk_tools`
+1. Descomprime y copia la carpeta del plugin en la carpeta de complementos de tu perfil de QGIS, por ejemplo:
+   - **Windows**: `C:\Users\USUARIO\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\PK_tools`
+   - **Linux/Mac**: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/PK_tools`
 2. Reinicia QGIS.
-3. Activa el complemento en  
-   `Complementos → Administrar e instalar complementos → Instalados`.
+3. Activa el complemento en `Complementos -> Administrar e instalar complementos -> Instalados`.
 
 ---
 
 ## 📋 Requisitos
 
-- QGIS **3.22+** (probado en QGIS 3.34 LTR).
-- Una capa de carreteras:
-  - De tipo **línea**.
-  - Con **geometría M** (calibración) válida.
-- Un campo en la tabla de atributos que identifique la vía (p. ej. `ID_ROAD`, `CARRETERA`, etc.).
-- Los valores M pueden estar:
-  - En **metros** (comportamiento por defecto).
-  - O directamente en **kilómetros** (configurable).
+- QGIS 3.22 o superior, probado especialmente en QGIS 3.34 LTR.
+- Una capa vectorial:
+  - De tipo línea.
+  - Con geometría M.
+  - Con valores M válidos.
+- Un campo identificador/vía en la tabla de atributos.
 
-> ⚠️ Si la capa no tiene geometría M o no es lineal, las herramientas mostrarán un mensaje indicando que la capa configurada no es válida.
+Los valores M pueden estar configurados como:
+
+- **Metros**.
+- **Kilómetros**.
+
+Si la capa no es lineal o no contiene geometría M, las herramientas mostrarán un aviso y no continuarán.
 
 ---
 
 ## ⚙️ Configuración
 
-La primera vez que actives PK Tools, se abrirá automáticamente la ventana de **Configuración**.  
-También puedes abrirla en cualquier momento desde el botón de **opciones** (flecha) al final de la barra `PK Tools`.
+La configuración se abre desde el botón de opciones de la barra `PK Tools`.
+También se solicitará al usar una herramienta si no existe una configuración válida.
+
+La configuración se guarda entre sesiones. Si ya hay una configuración válida, PK Tools no abre la ventana automáticamente al cargar el complemento.
 
 ![](PICTURES/CONFIG.png)
 
-En esta ventana configura tres ajustes:
+En la ventana se configuran estos ajustes:
 
-1. **Capa de vías**  
-   - Elige la capa lineal con geometría M sobre la que quieres trabajar.  
-   - Solo se muestran capas que sean líneas y tengan M.
+1. **Capa lineal con geometría M**
+   Capa sobre la que trabajarán las herramientas.
 
-2. **Campo identificador de la vía**  
-   - Selecciona el campo de la tabla de atributos que identifica la carretera (por ejemplo, `ID_ROAD`).  
-   - Se usará para: mostrar el nombre de la vía, autocompletar en Localizar PK y etiquetar resultados.
+2. **Campo identificador / vía**
+   Campo usado para identificar carreteras, tramos, ejes u otros elementos lineales.
 
-3. **Unidades del campo M**  
-   - Elige si los valores M de la capa están en **metros** (por defecto) o en **kilómetros**.  
-   - PK Tools convierte internamente para mostrar siempre PK en kilómetros (y en formato `km+MMM`).
+3. **Unidades de la medida M**
+   Indica si los valores M de la geometría están en metros o kilómetros.
 
-La vista previa de valores M en la parte inferior te ayuda a comprobar si los M parecen ser metros (valores grandes, p. ej. 12345.0) o kilómetros (valores tipo 12.345).
+4. **Salida mostrada**
+   - **Formato PK**: muestra resultados como `PK 150+500`.
+   - **Valor M bruto**: muestra resultados como `M 150500`.
 
-La configuración se guarda y se mantiene entre sesiones: **no hace falta configurarla cada vez que abras QGIS**.
+5. **Tolerancia clic-vía**
+   Umbral visual, en píxeles, usado por Distancia para avisar cuando el segundo clic cae lejos de la geometría inicial.
+
+La vista previa muestra ejemplos de valores M originales y cómo se verían con la configuración seleccionada.
+
+---
+
+## Modo Formato PK
+
+Modo orientado a carreteras y puntos kilométricos.
+
+Vocabulario usado:
+
+- **Vía**
+- **PK**
+
+Ejemplos de entrada aceptados en Localizar:
+
+- `150`
+- `150.500`
+- `150,500`
+- `150+500`
+- `0+010`
+
+Ejemplo de salida:
+
+- `PK 150+500`
+
+Exportación:
+
+- `VIA`
+- `PK` con valor de texto, por ejemplo `150+500`.
+- `PK_NUM` con valor numérico en kilómetros, por ejemplo `150.500`.
+
+---
+
+## Modo Valor M bruto
+
+Modo genérico para capas lineales con geometría M que no representan necesariamente carreteras o PKs.
+
+Vocabulario usado:
+
+- **Identificador**
+- **Medida**
+
+Ejemplo de entrada en Localizar:
+
+- `150500`
+
+Ejemplo de salida:
+
+- `M 150500`
+
+Exportación:
+
+- `IDENTIFICADOR`
+- `M_RAW`
+
+En este modo se evita hablar de PK en la interfaz, banners, historial y exportaciones.
 
 ---
 
 ## ✅ Uso rápido
 
-1. Configura la **capa de trabajo**, el **campo de vía** y las **unidades M** en la ventana de Configuración.
-2. Usa:
-   - **Identificar PK** para clicar en la carretera y ver vía + PK + enlace a Street View.
-   - **Localizar PK** para ir a un PK concreto, con historial y exportación.
-   - **Distancia PK** para medir la diferencia entre dos PKs y la distancia real.
-3. Si cambias de capa o de datos, abre de nuevo la **Configuración** y ajusta los parámetros.
+1. Abre la configuración desde el botón de opciones.
+2. Selecciona la capa lineal con geometría M.
+3. Selecciona el campo identificador/vía.
+4. Indica si los valores M están en metros o kilómetros.
+5. Elige la salida mostrada: Formato PK o Valor M bruto.
+6. Usa:
+   - **Identificar** para obtener la medida en un clic.
+   - **Localizar** para ir a una medida concreta.
+   - **Distancia** para medir entre dos posiciones sobre la misma geometría o parte inicial.
 
 ---
 
 ## ⚠️ Limitaciones y advertencias
 
-- **Tipo de capa**:
-  - Solo se admiten capas **lineales con M**.
-  - Si tu capa no tiene M, el complemento no puede calcular PKs.
-- **Consistencia de M**:
-  - Se asume que la calibración M es razonablemente coherente a lo largo de la vía.  
-    Si los M son muy erráticos, los resultados pueden no ser fiables.
-- **Rendimiento**:
-  - En capas muy grandes (muchos vértices y tramos), la búsqueda y la interpolación pueden tardar algo más.
-- **Edición de capas**:
-  - No se recomienda usar las herramientas mientras la capa está en edición.
-- **Street View**:
-  - Requiere conexión a Internet.  
-  - Respeta siempre los términos de uso de Google.
+- PK Tools depende de que la geometría tenga valores M válidos.
+- El plugin no genera ni corrige geometrías M.
+- La calidad del resultado depende de la calidad y coherencia de la geometría M.
+- Distancia no es una herramienta de rutas.
+- Distancia no busca caminos alternativos, no une features partidas y no reconstruye recorridos.
+- Si existen varias geometrías candidatas con el mismo identificador y rangos M similares, el plugin aplica una lógica conservadora.
+- En capas muy grandes, algunas operaciones pueden tardar más, especialmente al cargar autocompletados o recorrer geometrías complejas.
+- Street View requiere conexión a Internet y depende de la disponibilidad del servicio.
 
 ---
 
-## 📄 Licencia
+## Licencia
 
 Este proyecto se distribuye bajo la **GNU General Public License v3.0 (GPL-3.0)**.  
 Puedes usarlo, modificarlo y compartirlo libremente bajo los términos de esta licencia.
 
 ---
 
-## 👤 Autor
+## Autor
 
-- **LinkedIn**: [Javi H. Piris](https://www.linkedin.com/in/javierhpiris) 
+- **LinkedIn**: [Javi H. Piris](https://www.linkedin.com/in/javierhpiris)
 - **GitHub**: [@Javisionario](https://github.com/Javisionario)

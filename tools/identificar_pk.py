@@ -22,18 +22,23 @@ from qgis.core import (
     QgsCoordinateReferenceSystem, QgsWkbTypes, QgsVectorLayer,
     QgsSpatialIndex, QgsField, QgsFeature, Qgis
 )
-from ..settings import read_current_settings
+from ..settings import ensure_settings_configured, read_current_settings
+from ..utils import (
+    format_pk_export_text,
+    format_value_for_mode,
+    log_exception,
+    nearest_line_part_to_point,
+    output_terms,
+    pk_numeric_km,
+    pk_km_to_raw_m,
+    raw_m_export_value,
+    raw_m_to_pk_km,
+    resolve_configured_layer,
+)
 
 
 # Campo por defecto histórico (por si falta en settings)
 EXPECTED_FIELD = "ID_ROAD"
-
-
-def formato_pk(pk_total):
-    """Convierte un valor decimal de PK en formato km+000."""
-    km = int(pk_total)
-    m = int(round((pk_total - km) * 1000))
-    return f"{km}+{m:03d}"
 
 
 # ============================================================
@@ -57,8 +62,8 @@ class IdentificarPK:
         import os
         icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
         icon = QIcon(icon_path)
-        self.action = QAction(icon, "Identificar PK", self.iface.mainWindow())
-        self.action.setToolTip("Identificar PK en línea calibrada")
+        self.action = QAction(icon, "Identificar", self.iface.mainWindow())
+        self.action.setToolTip("Identificar una medida en la capa configurada")
         self.action.setCheckable(True)
         self.action.toggled.connect(self.toggle_tool)
         self.iface.addToolBarIcon(self.action)
@@ -91,41 +96,20 @@ class IdentificarPK:
 
     def activate_tool(self):
         """Selecciona la capa de configuración y activa la herramienta de identificación."""
+        tool_title = "Identificar PK"
         try:
-            cfg = read_current_settings()
-            layer_name = cfg.get("layer_name") or ""
-            id_field = cfg.get("id_field") or EXPECTED_FIELD
-            m_units = cfg.get("m_units") or "m"
-
-            if not layer_name:
-                self.iface.messageBar().pushMessage(
-                    "Identificar PK",
-                    "No hay capa de trabajo configurada. Abre 'Configuración PK Tools' para definirla.",
-                    level=Qgis.Info
-                )
+            if not ensure_settings_configured(self.iface):
                 return False
 
-            # Buscar la capa por nombre
-            layer = None
-            for lyr in QgsProject.instance().mapLayers().values():
-                if isinstance(lyr, QgsVectorLayer) and lyr.name() == layer_name:
-                    layer = lyr
-                    break
-
-            # Validar capa
-            if (
-                layer is None
-                or layer.geometryType() != QgsWkbTypes.LineGeometry
-                or not QgsWkbTypes.hasM(layer.wkbType())
-                or layer.fields().indexOf(id_field) == -1
-            ):
+            cfg = read_current_settings()
+            m_units = cfg.get("m_units") or "m"
+            output_mode = cfg.get("output_mode") or "pk"
+            tool_title = "Identificar medida" if output_mode == "raw_m" else "Identificar PK"
+            layer, id_field, layer_error = resolve_configured_layer(cfg, EXPECTED_FIELD)
+            if layer_error:
                 self.iface.messageBar().pushMessage(
-                    "Identificar PK",
-                    (
-                        f"La capa configurada '{layer_name}' no es válida. "
-                        "Debe ser lineal, tener geometría M y contener el campo "
-                        f"'{id_field}'."
-                    ),
+                    tool_title,
+                    layer_error,
                     level=Qgis.Warning
                 )
                 return False
@@ -139,13 +123,15 @@ class IdentificarPK:
             self.tool.index = QgsSpatialIndex(layer.getFeatures())
             self.tool.id_field = id_field
             self.tool.m_units = m_units
+            self.tool.output_mode = output_mode
 
             self.canvas.setMapTool(self.tool)
             return True
 
-        except Exception:
+        except Exception as exc:
+            log_exception("Error al activar Identificar PK", exc)
             self.iface.messageBar().pushMessage(
-                "Identificar PK",
+                tool_title,
                 "Error inesperado al seleccionar la capa.",
                 level=Qgis.Warning
             )
@@ -161,24 +147,29 @@ class IdentificarPK:
                 pass
             self._current_msg = None
 
-    def show_pk_message(self, nombre_via, pk_value, url_sv, lat=None, lon=None):
-        """Muestra en la barra el PK identificado, con enlace y botones de copia."""
-        pk_str = formato_pk(pk_value)
+    def show_pk_message(self, nombre_via, pk_value, url_sv, lat=None, lon=None,
+                        raw_m=None, m_units="m", output_mode="pk"):
+        """Muestra en la barra el valor identificado, con enlace y botones de copia."""
+        if raw_m is None:
+            raw_m = pk_km_to_raw_m(pk_value, m_units)
+        value_text = format_value_for_mode(raw_m, m_units, output_mode)
+        terms = output_terms(output_mode)
 
         # Texto principal
         if lat is not None and lon is not None:
             texto = (
-                f"Vía: {nombre_via} — PK {pk_str} ({pk_value:.3f} km) | "
+                f"{terms['identifier']}: {nombre_via} — {value_text} | "
                 f"<a href='{url_sv}'>Street View: {lat:.6f},{lon:.6f}</a>"
             )
         else:
             texto = (
-                f"Vía: {nombre_via} — PK {pk_str} ({pk_value:.3f} km) | "
+                f"{terms['identifier']}: {nombre_via} — {value_text} | "
                 f"<a href='{url_sv}'>Street View</a>"
             )
 
         self._pop_current_message()
-        msg = self.iface.messageBar().createMessage("Identificación de PK", texto)
+        title = "Identificación de medida" if output_mode == "raw_m" else "Identificación de PK"
+        msg = self.iface.messageBar().createMessage(title, texto)
 
         # Enlace adicional que NO cierra el mensaje
         lbl_sv = QLabel(f"<a href='{url_sv}'>[Street View]</a>")
@@ -186,11 +177,11 @@ class IdentificarPK:
         msg.layout().addWidget(lbl_sv)
 
         # Botones de copia
-        btn_via = QPushButton("Copiar carretera")
+        btn_via = QPushButton(f"Copiar {terms['identifier_lower']}")
         btn_via.clicked.connect(lambda: QApplication.clipboard().setText(f"{nombre_via}"))
 
-        btn_pk = QPushButton("Copiar PK")
-        btn_pk.clicked.connect(lambda: QApplication.clipboard().setText(pk_str))
+        btn_result = QPushButton("Copiar resultado")
+        btn_result.clicked.connect(lambda: QApplication.clipboard().setText(value_text))
 
         btn_coord = QPushButton("Copiar coordenadas")
         if url_sv and lat is not None and lon is not None:
@@ -207,7 +198,7 @@ class IdentificarPK:
             btn_coord.setEnabled(False)
 
         msg.layout().addWidget(btn_via)
-        msg.layout().addWidget(btn_pk)
+        msg.layout().addWidget(btn_result)
         msg.layout().addWidget(btn_coord)
 
         self.iface.messageBar().pushWidget(msg, Qgis.Info)
@@ -244,7 +235,8 @@ class ExportDialog(QDialog):
         self.listw = QListWidget()
         self.listw.setSelectionMode(QListWidget.NoSelection)
         for i, it in enumerate(self.items):
-            txt = f"{i+1:02d} — PK {it['pk_str']} — {it['via']}"
+            value_text = it.get('display_text') or it.get('pk_str') or ""
+            txt = f"{i+1:02d} — {value_text} — {it['via']}"
             li = QListWidgetItem(txt)
             li.setFlags(li.flags() | Qt.ItemIsUserCheckable)
             li.setCheckState(Qt.Unchecked)
@@ -296,6 +288,7 @@ class IdentificarPKTool(QgsMapTool):
         self.history = []
         self.id_field = EXPECTED_FIELD   # se sobrescribe desde settings
         self.m_units = "m"               # "m" (por defecto) o "km"
+        self.output_mode = "pk"
 
     # ---------- Manejo de marcadores ----------
     def _add_marker(self, map_pt):
@@ -344,12 +337,15 @@ class IdentificarPKTool(QgsMapTool):
             self.canvas.unsetMapTool(self)
 
     # ---------- Historial ----------
-    def _push_history(self, via, pk_value, map_pt):
+    def _push_history(self, via, pk_value, map_pt, raw_m=None):
         """Guarda el resultado en el historial."""
+        if raw_m is None:
+            raw_m = pk_km_to_raw_m(pk_value, self.m_units)
         item = {
             'via': via,
             'pk_value': pk_value,
-            'pk_str': formato_pk(pk_value),
+            'm_raw': raw_m,
+            'display_text': format_value_for_mode(raw_m, self.m_units, self.output_mode),
             'map_pt': QgsPointXY(map_pt)
         }
         self.history.append(item)
@@ -360,9 +356,10 @@ class IdentificarPKTool(QgsMapTool):
     def identify_point(self, point):
         """Identifica el PK en el clic dado."""
         try:
+            tool_title = "Identificar medida" if self.output_mode == "raw_m" else "Identificar PK"
             if not self.layer or not self.index:
                 self.iface.messageBar().pushMessage(
-                    "Identificar PK", "No hay capa válida asignada.",
+                    tool_title, "No hay capa válida asignada.",
                     level=Qgis.Warning
                 )
                 return
@@ -380,30 +377,36 @@ class IdentificarPKTool(QgsMapTool):
             # Buscar la línea más cercana
             nearest_ids = self.index.nearestNeighbor(point_layer_crs, 5)
             closest_feat, closest_dist, proj_pt = None, float('inf'), None
+            closest_part_geom, closest_part_verts = None, None
             for fid in nearest_ids:
                 feat = layer.getFeature(fid)
                 geom = feat.geometry()
-                near = geom.nearestPoint(QgsGeometry.fromPointXY(QgsPointXY(point_layer_crs)))
-                d = point_layer_crs.distance(near.asPoint())
+                part_match = nearest_line_part_to_point(geom, point_layer_crs)
+                if not part_match:
+                    continue
+                part_verts, part_geom, near, d = part_match
                 if d < closest_dist:
                     closest_dist = d
                     closest_feat = feat
                     proj_pt = near
+                    closest_part_geom = part_geom
+                    closest_part_verts = part_verts
 
-            if not closest_feat or proj_pt is None:
+            if not closest_feat or proj_pt is None or closest_part_geom is None:
                 self.iface.messageBar().pushMessage(
-                    "Identificar PK", "No se encontró línea cercana.",
+                    tool_title, "No se encontró línea cercana.",
                     level=Qgis.Info
                 )
                 return
 
             # Calcular PK interpolado según valores M
-            geom_line = closest_feat.geometry()
-            dist_click = geom_line.lineLocatePoint(proj_pt)
-            verts = list(geom_line.vertices())
+            # Calcular la medida solo sobre la parte elegida. En multipart no
+            # se enlazan vertices de partes distintas.
+            dist_click = closest_part_geom.lineLocatePoint(proj_pt)
+            verts = closest_part_verts
             if len(verts) < 2:
                 self.iface.messageBar().pushMessage(
-                    "Identificar PK", "Geometría no válida.",
+                    tool_title, "Geometría no válida.",
                     level=Qgis.Warning
                 )
                 return
@@ -423,17 +426,21 @@ class IdentificarPKTool(QgsMapTool):
                 len(cum) - 2
             )
 
-            # Conversión de M a km según configuración:
-            # - Si m_units == "m", el campo M está en metros → dividimos entre 1000
-            # - Si m_units == "km", el campo M ya está en kilómetros → no convertimos
-            factor = 1000.0 if (self.m_units or "m") == "m" else 1.0
-            m1 = verts[idx].m() / factor
-            m2 = verts[idx + 1].m() / factor
-
             start_seg = cum[idx]
             seg_len = cum[idx + 1] - start_seg
             t = (dist_click - start_seg) / seg_len if seg_len > 0 else 0.0
-            pk_final = m1 + t * (m2 - m1)
+
+            m1_raw = verts[idx].m()
+            m2_raw = verts[idx + 1].m()
+            if m1_raw is None or m2_raw is None:
+                self.iface.messageBar().pushMessage(
+                    tool_title, "El tramo localizado no tiene medidas M válidas.",
+                    level=Qgis.Warning
+                )
+                return
+
+            m_raw = m1_raw + t * (m2_raw - m1_raw)
+            pk_final = raw_m_to_pk_km(m_raw, self.m_units)
 
             # Actualizar marcador
             self.clear_markers()
@@ -457,22 +464,25 @@ class IdentificarPKTool(QgsMapTool):
             )
 
             field = self.id_field
+            terms = output_terms(self.output_mode)
+            unknown_label = f"{terms['identifier']} desconocido"
             try:
                 nombre_via = (
                     closest_feat[field]
                     if field and closest_feat[field] not in (None, "")
-                    else "Vía desconocida"
+                    else unknown_label
                 )
             except Exception:
-                nombre_via = "Vía desconocida"
+                nombre_via = unknown_label
 
             # Guardar en historial y mostrar mensaje
-            self._push_history(nombre_via, pk_final, proj_pt_map)
-            self.callback(nombre_via, pk_final, url_sv, lat, lon)
+            self._push_history(nombre_via, pk_final, proj_pt_map, m_raw)
+            self.callback(nombre_via, pk_final, url_sv, lat, lon, m_raw, self.m_units, self.output_mode)
 
-        except Exception:
+        except Exception as exc:
+            log_exception("Error al calcular Identificar PK", exc)
             self.iface.messageBar().pushMessage(
-                "Identificar PK", "Error inesperado al calcular el PK.",
+                tool_title, "Error inesperado al calcular la medida.",
                 level=Qgis.Warning
             )
 
@@ -487,22 +497,34 @@ class IdentificarPKTool(QgsMapTool):
 
     def _export_points_dialog(self):
         """Muestra el diálogo de exportación y guarda los puntos en una capa temporal."""
+        tool_title = "Identificar medida" if self.output_mode == "raw_m" else "Identificar PK"
         if not self.history:
             self.iface.messageBar().pushMessage(
-                "Identificar PK", "No hay puntos recientes para exportar.",
+                tool_title, "No hay puntos recientes para exportar.",
                 level=Qgis.Info
             )
             return
 
         base = self.history[-self.MAX_HISTORY:]
-        items_display = list(reversed(base))
+        items_display = []
+        for it in reversed(base):
+            item = dict(it)
+            raw_m = item.get('m_raw')
+            if raw_m is None:
+                raw_m = pk_km_to_raw_m(item.get('pk_value', 0.0), self.m_units)
+            item['display_text'] = format_value_for_mode(
+                raw_m,
+                self.m_units,
+                self.output_mode,
+            )
+            items_display.append(item)
 
         dlg = ExportDialog(self.iface.mainWindow(), items_display)
         if dlg.exec_() == QDialog.Accepted:
             idxs = dlg.selected_indices()
             if not idxs:
                 self.iface.messageBar().pushMessage(
-                    "Identificar PK", "No se seleccionaron puntos.",
+                    tool_title, "No se seleccionaron puntos.",
                     level=Qgis.Info
                 )
                 return
@@ -510,19 +532,32 @@ class IdentificarPKTool(QgsMapTool):
             lyr = self._ensure_output_layer()
             if not lyr:
                 self.iface.messageBar().pushMessage(
-                    "Identificar PK", "No se pudo crear la capa de salida.",
+                    tool_title, "No se pudo crear la capa de salida.",
                     level=Qgis.Warning
                 )
                 return
 
-            # Crear features y añadirlos
+            # Exportacion conservadora:
+            # - modo PK: PK sin prefijo y PK_NUM numerico
+            # - modo M bruto: solo M_RAW numerico
             prov = lyr.dataProvider()
             feats = []
             for it in sel_items:
                 f = QgsFeature(lyr.fields())
                 f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(it['map_pt'])))
-                f['VIA'] = it['via']
-                f['PK'] = it['pk_str']
+                terms = output_terms(self.output_mode)
+                f[terms['id_field']] = it['via']
+                if self.output_mode == "raw_m":
+                    raw_m = it.get('m_raw')
+                    if raw_m is None:
+                        raw_m = pk_km_to_raw_m(it.get('pk_value', 0.0), self.m_units)
+                    f[terms['value_field']] = raw_m_export_value(raw_m)
+                else:
+                    raw_m = it.get('m_raw')
+                    if raw_m is None:
+                        raw_m = pk_km_to_raw_m(it.get('pk_value', 0.0), self.m_units)
+                    f[terms['value_field']] = format_pk_export_text(raw_m, self.m_units)
+                    f[terms['pk_number_field']] = pk_numeric_km(raw_m, self.m_units)
                 feats.append(f)
 
             prov.addFeatures(feats)
@@ -533,23 +568,48 @@ class IdentificarPKTool(QgsMapTool):
 
     def _ensure_output_layer(self):
         """Crea o recupera la capa temporal de salida."""
-        name = "Identificacion PKs"
+        terms = output_terms(self.output_mode)
+        name = terms['identified_layer']
+        id_field = terms['id_field']
+        value_field = terms['value_field']
         prj = QgsProject.instance()
         for lyr in prj.mapLayers().values():
             if (isinstance(lyr, QgsVectorLayer)
                 and lyr.name() == name
                 and lyr.geometryType() == QgsWkbTypes.PointGeometry):
-                if {f.name() for f in lyr.fields()} >= {"VIA", "PK"}:
+                required_fields = {id_field, value_field}
+                if self.output_mode != "raw_m":
+                    required_fields.add(terms['pk_number_field'])
+                field_names = {f.name() for f in lyr.fields()}
+                if field_names >= required_fields:
+                    return lyr
+                missing = required_fields - field_names
+                if missing:
+                    provider = lyr.dataProvider()
+                    new_fields = []
+                    if id_field in missing:
+                        new_fields.append(QgsField(id_field, QVariant.String))
+                    if value_field in missing:
+                        value_type = QVariant.Double if self.output_mode == "raw_m" else QVariant.String
+                        new_fields.append(QgsField(value_field, value_type))
+                    if terms['pk_number_field'] in missing and self.output_mode != "raw_m":
+                        new_fields.append(QgsField(terms['pk_number_field'], QVariant.Double, "double", 20, 3))
+                    if new_fields:
+                        provider.addAttributes(new_fields)
+                        lyr.updateFields()
                     return lyr
 
         map_crs = self.canvas.mapSettings().destinationCrs()
         authid = map_crs.authid() or "EPSG:4326"
         vl = QgsVectorLayer(f"Point?crs={authid}", name, "memory")
         prov = vl.dataProvider()
-        prov.addAttributes([
-            QgsField("VIA", QVariant.String),
-            QgsField("PK", QVariant.String)
-        ])
+        fields = [QgsField(id_field, QVariant.String)]
+        if self.output_mode == "raw_m":
+            fields.append(QgsField(value_field, QVariant.Double))
+        else:
+            fields.append(QgsField(value_field, QVariant.String))
+            fields.append(QgsField(terms['pk_number_field'], QVariant.Double, "double", 20, 3))
+        prov.addAttributes(fields)
         vl.updateFields()
         prj.addMapLayer(vl)
         return vl
