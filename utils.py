@@ -281,6 +281,62 @@ def nearest_interval_endpoint(target_m, intervals):
     return min(endpoints, key=lambda value: (abs(value - target), value))
 
 
+def line_part_vertices(geom):
+    """Devuelve vertices por parte, sin unir artificialmente partes multipart."""
+    try:
+        if geom is None or geom.isEmpty():
+            return
+    except Exception:
+        return
+
+    try:
+        parts = list(geom.constParts())
+    except Exception:
+        parts = []
+
+    if parts:
+        for part in parts:
+            verts = list(part.vertices())
+            if len(verts) >= 2:
+                yield verts
+        return
+
+    verts = list(geom.vertices())
+    if len(verts) >= 2:
+        yield verts
+
+
+def line_geometry_from_vertices(verts):
+    """Crea una geometria XY auxiliar para proyectar sobre una unica parte."""
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    return QgsGeometry.fromPolylineXY([QgsPointXY(point) for point in verts])
+
+
+def nearest_line_part_to_point(geom, point):
+    """
+    Elige la parte lineal mas cercana a un punto.
+
+    Devuelve (vertices_de_la_parte, geometria_xy_de_la_parte,
+    punto_proyectado, distancia). Las herramientas conservan los vertices
+    originales para interpolar M; la geometria XY solo se usa para proyectar.
+    """
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    point_xy = QgsPointXY(point)
+    point_geom = QgsGeometry.fromPointXY(point_xy)
+    best = None
+
+    for verts in line_part_vertices(geom):
+        part_geom = line_geometry_from_vertices(verts)
+        near = part_geom.nearestPoint(point_geom)
+        dist = point_xy.distance(near.asPoint())
+        if best is None or dist < best[3]:
+            best = (verts, part_geom, near, dist)
+
+    return best
+
+
 def find_layer_by_config(cfg):
     """Busca la capa por id y usa el nombre como fallback de configuraciones antiguas."""
     from qgis.core import QgsProject, QgsVectorLayer

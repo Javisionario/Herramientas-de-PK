@@ -19,7 +19,9 @@ from ..settings import DEFAULT_CLICK_TOLERANCE_PX, ensure_settings_configured, r
 from ..utils import (
     format_raw_m,
     format_value_for_mode,
+    line_part_vertices,
     log_exception,
+    nearest_line_part_to_point,
     output_terms,
     pk_km_to_raw_m,
     raw_m_to_pk_km,
@@ -38,6 +40,7 @@ class DistanciaPK:
         self.tool = None
         # Para controlar solo nuestro mensaje
         self.current_msg = None
+        self.warning_msg = None
 
     def initGui(self):
         import os
@@ -58,6 +61,7 @@ class DistanciaPK:
         if self.tool and self.canvas.mapTool() == self.tool:
             self.canvas.unsetMapTool(self.tool)
         self._close_messagebar()
+        self._close_warning_messagebar()
         if self.action:
             self.iface.removeToolBarIcon(self.action)
             self.action = None
@@ -73,6 +77,7 @@ class DistanciaPK:
             if self.tool:
                 self.tool.reset()
             self._close_messagebar()
+            self._close_warning_messagebar()
 
     def activate_tool(self):
         """
@@ -99,7 +104,12 @@ class DistanciaPK:
 
             # Crear herramienta si no existe
             if not self.tool:
-                self.tool = DistanciaTool(self.iface, self.canvas, self.show_distance_message)
+                self.tool = DistanciaTool(
+                    self.iface,
+                    self.canvas,
+                    self.show_distance_message,
+                    self.show_warning_message,
+                )
 
             self.tool.layer = layer
             self.tool.index = QgsSpatialIndex(layer.getFeatures())
@@ -130,6 +140,7 @@ class DistanciaPK:
                               distance_reliable=True):
         # Cerrar mensaje anterior antes de crear uno nuevo
         self._close_messagebar()
+        self._close_warning_messagebar()
 
         if raw_m1 is None:
             raw_m1 = pk_km_to_raw_m(pk1, m_units)
@@ -154,6 +165,10 @@ class DistanciaPK:
 
         title = "Distancia M" if output_mode == "raw_m" else "Distancia PK"
         msg = self.iface.messageBar().createMessage(title, texto)
+        try:
+            msg.destroyed.connect(lambda *_: self._close_warning_messagebar())
+        except Exception:
+            pass
 
         btn_pk = QPushButton(f"Copiar {dist_label}")
         btn_pk.clicked.connect(lambda: QApplication.clipboard().setText(dist_value))
@@ -166,6 +181,12 @@ class DistanciaPK:
 
         # Guardamos el handler para poder cerrar solo este mensaje
         self.current_msg = self.iface.messageBar().pushWidget(msg, Qgis.Info)
+
+    def show_warning_message(self, title, text):
+        """Muestra un aviso de esta herramienta, sustituyendo avisos anteriores."""
+        self._close_warning_messagebar()
+        msg = self.iface.messageBar().createMessage(title, text)
+        self.warning_msg = self.iface.messageBar().pushWidget(msg, Qgis.Warning)
 
     def _close_messagebar(self):
         """Cierra solo el mensaje de esta herramienta, si existe."""
@@ -180,6 +201,19 @@ class DistanciaPK:
             finally:
                 self.current_msg = None
 
+    def _close_warning_messagebar(self):
+        """Cierra solo el aviso de esta herramienta, si existe."""
+        if self.warning_msg:
+            try:
+                self.iface.messageBar().popWidget(self.warning_msg)
+            except Exception:
+                try:
+                    self.warning_msg.close()
+                except Exception:
+                    pass
+            finally:
+                self.warning_msg = None
+
     def run(self):
         return self.activate_tool()
 
@@ -192,14 +226,16 @@ class DistanciaPK:
             if self.canvas.mapTool() == self.tool:
                 self.canvas.unsetMapTool(self.tool)
         self._close_messagebar()
+        self._close_warning_messagebar()
 
 
 class DistanciaTool(QgsMapTool):
-    def __init__(self, iface, canvas, callback):
+    def __init__(self, iface, canvas, callback, warning_callback=None):
         super().__init__(canvas)
         self.iface = iface
         self.canvas = canvas
         self.callback = callback
+        self.warning_callback = warning_callback
         self.layer = None
         self.index = None
         self.id_field = EXPECTED_FIELD   # se sobreescribe desde settings
@@ -261,9 +297,13 @@ class DistanciaTool(QgsMapTool):
         self.raw_m_values = []
         self.line_distances = []
         self.first_feat = None
+        self.first_part_geom = None
+        self.first_part_verts = None
         self.click_count = 0
 
     def canvasReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
         pt_map = self.toMapCoordinates(event.pos())
         if self.click_count >= 2:
             # Nueva medición: borra puntos (la barra se reemplaza en show_distance_message)
@@ -297,17 +337,22 @@ class DistanciaTool(QgsMapTool):
                 # Primer punto
                 fids = self.index.nearestNeighbor(layer_pt, 5)
                 closest_feat, proj_pt_layer = None, None
+                closest_part_geom, closest_part_verts = None, None
                 min_d = float('inf')
                 for fid in fids:
                     feat = self.layer.getFeature(fid)
-                    near = feat.geometry().nearestPoint(QgsGeometry.fromPointXY(QgsPointXY(layer_pt)))
-                    d = layer_pt.distance(near.asPoint())
+                    part_match = nearest_line_part_to_point(feat.geometry(), layer_pt)
+                    if not part_match:
+                        continue
+                    part_verts, part_geom, near, d = part_match
                     if d < min_d:
                         min_d = d
                         closest_feat = feat
                         proj_pt_layer = near
+                        closest_part_geom = part_geom
+                        closest_part_verts = part_verts
 
-                if not closest_feat:
+                if not closest_feat or closest_part_geom is None:
                     self.iface.messageBar().pushMessage(
                         tool_title,
                         "No se encontró línea cercana.",
@@ -316,7 +361,13 @@ class DistanciaTool(QgsMapTool):
                     return
 
                 self.first_feat = closest_feat
-                pk1, dist1, raw_m1, reliable1 = self._compute_pk_and_dist(closest_feat.geometry(), proj_pt_layer)
+                self.first_part_geom = closest_part_geom
+                self.first_part_verts = closest_part_verts
+                pk1, dist1, raw_m1, reliable1 = self._compute_pk_and_dist(
+                    closest_part_geom,
+                    proj_pt_layer,
+                    closest_part_verts,
+                )
                 self.distance_reliable = reliable1
 
                 proj1_map = proj_pt_layer.asPoint()
@@ -332,7 +383,15 @@ class DistanciaTool(QgsMapTool):
 
             else:
                 # Segundo punto sobre la MISMA geometria seleccionada con el primer clic.
-                geom = self.first_feat.geometry()
+                geom = self.first_part_geom
+                if geom is None or self.first_part_verts is None:
+                    self.iface.messageBar().pushMessage(
+                        tool_title,
+                        "No hay geometrÃ­a inicial vÃ¡lida.",
+                        level=Qgis.Warning
+                    )
+                    self.reset()
+                    return
                 near_layer = geom.nearestPoint(QgsGeometry.fromPointXY(QgsPointXY(layer_pt)))
                 proj2_map = near_layer.asPoint()
                 if map_crs != layer_crs:
@@ -341,7 +400,11 @@ class DistanciaTool(QgsMapTool):
 
                 offset_px = self._visual_distance_px(click_pt_map, proj2_map)
                 far_second_click = offset_px > self.click_tolerance_px
-                pk2, dist2, raw_m2, reliable2 = self._compute_pk_and_dist(geom, near_layer)
+                pk2, dist2, raw_m2, reliable2 = self._compute_pk_and_dist(
+                    geom,
+                    near_layer,
+                    self.first_part_verts,
+                )
 
                 self._add_marker(proj2_map)
 
@@ -376,11 +439,15 @@ class DistanciaTool(QgsMapTool):
                     self.distance_reliable and reliable2
                 )
                 if far_second_click:
-                    self.iface.messageBar().pushMessage(
-                        tool_title,
-                        "El segundo punto está lejos de la geometría seleccionada. Revisa la medición.",
-                        level=Qgis.Warning
-                    )
+                    warning_text = "El segundo punto está lejos de la geometría seleccionada. Revisa la medición."
+                    if self.warning_callback is not None:
+                        self.warning_callback(tool_title, warning_text)
+                    else:
+                        self.iface.messageBar().pushMessage(
+                            tool_title,
+                            warning_text,
+                            level=Qgis.Warning
+                        )
 
         except Exception as e:
             log_exception("Error al calcular Distancia PK", e)
@@ -390,16 +457,19 @@ class DistanciaTool(QgsMapTool):
                 level=Qgis.Warning
             )
 
-    def _compute_pk_and_dist(self, geom_line, proj_pt_layer):
+    def _compute_pk_and_dist(self, geom_line, proj_pt_layer, part_verts=None):
         """
         Devuelve:
           - pk_km: PK interno en km, interpolado desde los valores M originales.
           - dist_click_m: distancia acumulada sobre la misma feature, en metros.
 
         Deliberadamente no reconstruye rutas ni salta entre features partidas.
+        En multipart, geom_line y part_verts representan una unica parte.
         """
         dist_click = geom_line.lineLocatePoint(proj_pt_layer)
-        verts = list(geom_line.vertices())
+        if part_verts is None:
+            part_verts = next(line_part_vertices(geom_line), [])
+        verts = part_verts
         if len(verts) < 2:
             return 0.0, 0.0, 0.0, False
 

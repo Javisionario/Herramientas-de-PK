@@ -20,6 +20,7 @@ from ..utils import (
     format_pk_export_text,
     format_value_for_mode,
     interval_tolerance_to_raw,
+    line_part_vertices,
     log_exception,
     nearest_interval_endpoint,
     output_terms,
@@ -226,24 +227,6 @@ class LocalizarPK:
             return None
         return typed
 
-    def _geometry_parts_vertices(self, geom):
-        """Devuelve vertices por parte, evitando unir partes multipart."""
-        try:
-            parts = list(geom.constParts())
-        except Exception:
-            parts = []
-
-        if parts:
-            for part in parts:
-                verts = list(part.vertices())
-                if len(verts) >= 2:
-                    yield verts
-            return
-
-        verts = list(geom.vertices())
-        if len(verts) >= 2:
-            yield verts
-
     def _interpolate_segment_by_m(self, p0, p1, target_m, eps):
         m0, m1 = p0.m(), p1.m()
         if m0 is None or m1 is None:
@@ -330,7 +313,7 @@ class LocalizarPK:
             if not geom:
                 continue
 
-            for part_idx, verts in enumerate(self._geometry_parts_vertices(geom)):
+            for part_idx, verts in enumerate(line_part_vertices(geom)):
                 for seg_idx in range(len(verts) - 1):
                     p0, p1 = verts[seg_idx], verts[seg_idx + 1]
                     m0, m1 = p0.m(), p1.m()

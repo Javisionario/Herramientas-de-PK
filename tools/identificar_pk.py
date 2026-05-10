@@ -27,6 +27,7 @@ from ..utils import (
     format_pk_export_text,
     format_value_for_mode,
     log_exception,
+    nearest_line_part_to_point,
     output_terms,
     pk_numeric_km,
     pk_km_to_raw_m,
@@ -376,17 +377,22 @@ class IdentificarPKTool(QgsMapTool):
             # Buscar la línea más cercana
             nearest_ids = self.index.nearestNeighbor(point_layer_crs, 5)
             closest_feat, closest_dist, proj_pt = None, float('inf'), None
+            closest_part_geom, closest_part_verts = None, None
             for fid in nearest_ids:
                 feat = layer.getFeature(fid)
                 geom = feat.geometry()
-                near = geom.nearestPoint(QgsGeometry.fromPointXY(QgsPointXY(point_layer_crs)))
-                d = point_layer_crs.distance(near.asPoint())
+                part_match = nearest_line_part_to_point(geom, point_layer_crs)
+                if not part_match:
+                    continue
+                part_verts, part_geom, near, d = part_match
                 if d < closest_dist:
                     closest_dist = d
                     closest_feat = feat
                     proj_pt = near
+                    closest_part_geom = part_geom
+                    closest_part_verts = part_verts
 
-            if not closest_feat or proj_pt is None:
+            if not closest_feat or proj_pt is None or closest_part_geom is None:
                 self.iface.messageBar().pushMessage(
                     tool_title, "No se encontró línea cercana.",
                     level=Qgis.Info
@@ -394,9 +400,10 @@ class IdentificarPKTool(QgsMapTool):
                 return
 
             # Calcular PK interpolado según valores M
-            geom_line = closest_feat.geometry()
-            dist_click = geom_line.lineLocatePoint(proj_pt)
-            verts = list(geom_line.vertices())
+            # Calcular la medida solo sobre la parte elegida. En multipart no
+            # se enlazan vertices de partes distintas.
+            dist_click = closest_part_geom.lineLocatePoint(proj_pt)
+            verts = closest_part_verts
             if len(verts) < 2:
                 self.iface.messageBar().pushMessage(
                     tool_title, "Geometría no válida.",
